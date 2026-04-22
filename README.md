@@ -54,22 +54,55 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 2. 未設定 & ターゲット取得済み → `central_curve` への最短距離で自動選択
 3. 未設定 & ターゲットなし → `is_target_lane=true` を fallback
 
-**主な出力フィールド:**
+**主な出力フィールド（直交座標系）:**
 
 | フィールド | 説明 |
 |---|---|
 | `distance_to_left_boundary_m` | ターゲット ↔ 左境界 curve 全体の最短距離 [m] |
 | `distance_target_edge_to_selected_y_m` | `target.local_y - selected.y - width/2`（y軸方向の端-点距離） |
 | `selected_point` | `curve_point_index` で指定した curve 上の点の座標 |
+| `nearest_point_on_left_curve` | polyline 上の最短点（頂点間の補間点）|
 | `available_segments` | 全 segment の id と距離一覧（id 確認・選択用） |
+
+**主な出力フィールド（SL 座標系 / Frenet, v6〜）:**
+
+SL の基準は選択 segment の `central_curve`。
+- `S`: `central_curve[0]` から polyline 沿いに測った累積弧長 [m]
+- `L`: `central_curve` 進行方向から見た符号付き横距離 [m]（左=正 / 右=負）
+
+| フィールド | 説明 |
+|---|---|
+| `sl_valid` | SL 変換が成立した場合 true |
+| `central_curve_total_length_m` | `central_curve` 全体の弧長 [m] |
+| `target_s_m` / `target_l_m` | ターゲットの SL 座標 |
+| `left_boundary_l_at_target_s_m` | ターゲットと同じ S 位置での左白線 L 値 |
+| `distance_target_to_left_boundary_sl_m` | SL 空間での中心→左白線 横距離（符号付き、通常 +） |
+| `distance_target_edge_to_left_boundary_sl_m` | 上記から `target.width/2` を引いた端-白線距離 |
+| `right_boundary_*` | 右白線も同様（距離は `target_l - right_l` の形で計算） |
+| `left_boundary_l_bracket_mode` | 補間区間種別（`interpolated` / `before_start` / `after_end` 等、デバッグ用） |
 
 **Plot パネルでの活用例:**
 ```
+# 直交座標系
 lane_boundary_tracker.distance_to_left_boundary_m
 lane_boundary_tracker.distance_target_edge_to_selected_y_m
+
+# SL 座標系（停止車両↔白線距離はこちらが推奨）
+lane_boundary_tracker.distance_target_edge_to_left_boundary_sl_m
+lane_boundary_tracker.distance_target_edge_to_right_boundary_sl_m
+lane_boundary_tracker.target_s_m
+lane_boundary_tracker.target_l_m
+
 lane_boundary_tracker.target_object_found
 lane_boundary_tracker.segment_found
+lane_boundary_tracker.sl_valid
 ```
+
+**SL 変換の注意点:**
+- `central_curve` はセグメント単位で定義されるため、セグメントをまたぐと S がリセットされます
+- 2D（x-y 平面）で計算しています。勾配のある道路では若干の誤差が出ます
+- 左/右白線の点は `central_curve` 上で S が単調増加であることを前提に線形補間しています
+- `bracket_mode = before_start / after_end` の場合は target の S 位置が白線の範囲外（外挿相当）なので値の信頼性は落ちます
 
 ## 使用上の注意
 

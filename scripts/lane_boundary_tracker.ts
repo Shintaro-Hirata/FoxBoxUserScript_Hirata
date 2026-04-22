@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v5
+// Left boundary tracker + distance calculator  v6
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -13,6 +13,9 @@
 //            augmented_objects の bbox_info は local_position のみ保持し world 座標を
 //            持たないため、target_object スクリプトと同一ロジック (world 座標検索) で
 //            bev_detection から local_position を取得してから距離計算する。
+//   v6     : SL 座標系 (Frenet) への変換を追加
+//            central_curve を基準に target/left/right boundary を s(弧長)/l(符号付き横距離)
+//            に変換し、SL 空間での車両端↔白線距離を出力する。
 //
 // 入力:   /t2/object_augmentor/augmented_scene
 //         /t2/bev_detection/objects
@@ -36,6 +39,18 @@
 //   distance_target_edge_to_selected_y_m : target.local_y - selected.y - width/2
 //   selected_point                        : curve_point_index で指定した curve 上の点
 //   available_segments                    : 全 segment の id と距離一覧 (id 確認用)
+//   ---- SL 座標系 (v6) ----
+//   target_s_m / target_l_m              : central_curve を基準にした target の SL
+//   left_boundary_l_at_target_s_m        : target と同じ s 位置での左白線の L 値
+//   distance_target_to_left_boundary_sl_m: SL 空間での target → 左白線 横距離 (符号付き、左=正)
+//   distance_target_edge_to_left_boundary_sl_m: 上記から target.width/2 を引いた端-白線距離
+//   (right_boundary も同様)
+// ----------------------------------------------------------------------------
+// SL 座標系の定義:
+//   S: central_curve の始点 (curve[0]) からポリライン沿いに測った累積弧長 [m]
+//   L: central_curve に対する横方向距離 (2D x-y 平面, 右手系で左が正) [m]
+//   L > 0 → central_curve 進行方向の左側 (左白線があるはずの側)
+//   L < 0 → central_curve 進行方向の右側
 // ============================================================================
 
 import { Input } from "./types";
@@ -124,6 +139,21 @@ type Output = {
   distance_target_edge_to_selected_y_m: number;
   available_segments: SegmentSummary[];
   available_segment_count: number;
+  // ---- SL 座標系 (v6) ----
+  sl_valid: boolean;
+  central_curve_total_length_m: number;
+  target_s_m: number;
+  target_l_m: number;
+  target_central_projection: Vec3;
+  target_central_segment_index: number;
+  left_boundary_l_at_target_s_m: number;
+  left_boundary_l_bracket_mode: string;
+  distance_target_to_left_boundary_sl_m: number;
+  distance_target_edge_to_left_boundary_sl_m: number;
+  right_boundary_l_at_target_s_m: number;
+  right_boundary_l_bracket_mode: string;
+  distance_target_to_right_boundary_sl_m: number;
+  distance_target_edge_to_right_boundary_sl_m: number;
 };
 
 // --- ユーティリティ ---------------------------------------------------------
@@ -165,6 +195,106 @@ function ptCurve(p: Vec3, c: Vec3[]): { dist: number; point: Vec3; index: number
 function minDist(p: Vec3, c: Vec3[]): number {
   if (c.length === 0) return Number.POSITIVE_INFINITY;
   return ptCurve(p, c).dist;
+}
+
+// --- SL 座標系ユーティリティ ------------------------------------------------
+// 2D (x-y 平面) で点 p を線分 a-b に投影し、パラメータ t と投影点を返す。
+function ptSegXYWithT(p: Vec3, a: Vec3, b: Vec3): {
+  t: number; point: Vec3; dist2D: number;
+} {
+  const abx = b.x - a.x; const aby = b.y - a.y;
+  const lenSq = abx * abx + aby * aby;
+  if (lenSq === 0) {
+    const dx = p.x - a.x; const dy = p.y - a.y;
+    return { t: 0, point: copyVec3(a), dist2D: Math.sqrt(dx * dx + dy * dy) };
+  }
+  const t = Math.max(0, Math.min(1,
+    ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq));
+  const proj: Vec3 = { x: a.x + t * abx, y: a.y + t * aby, z: a.z + t * (b.z - a.z) };
+  const dx = p.x - proj.x; const dy = p.y - proj.y;
+  return { t, point: proj, dist2D: Math.sqrt(dx * dx + dy * dy) };
+}
+
+// central_curve 上の各頂点までの累積弧長 (2D) を返す。
+// 戻り値は length === curve.length で、cum[i] = curve[0]→curve[i] の弧長。
+function cumulativeS(c: Vec3[]): number[] {
+  const out: number[] = [];
+  if (c.length === 0) return out;
+  out.push(0);
+  for (let i = 1; i < c.length; i++) {
+    const dx = c[i]!.x - c[i - 1]!.x;
+    const dy = c[i]!.y - c[i - 1]!.y;
+    out.push(out[i - 1]! + Math.sqrt(dx * dx + dy * dy));
+  }
+  return out;
+}
+
+// 点 p を central_curve に投影し、SL 座標を計算する。
+// L は符号付き (2D 外積, 進行方向から見て左=正)。
+function pointToSL(p: Vec3, curve: Vec3[], cumS: number[]): {
+  valid: boolean;
+  s: number;
+  l: number;
+  projection: Vec3;
+  segmentIndex: number;
+} {
+  if (curve.length === 0) {
+    return { valid: false, s: 0, l: 0, projection: zeroVec3(), segmentIndex: -1 };
+  }
+  if (curve.length === 1) {
+    const dx = p.x - curve[0]!.x; const dy = p.y - curve[0]!.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    return { valid: true, s: 0, l: d, projection: copyVec3(curve[0]!), segmentIndex: 0 };
+  }
+
+  let bestD = Number.POSITIVE_INFINITY;
+  let bestIdx = 0;
+  let bestT = 0;
+  let bestPoint = zeroVec3();
+
+  for (let i = 0; i < curve.length - 1; i++) {
+    const r = ptSegXYWithT(p, curve[i]!, curve[i + 1]!);
+    if (r.dist2D < bestD) {
+      bestD = r.dist2D; bestIdx = i; bestT = r.t; bestPoint = r.point;
+    }
+  }
+
+  // S 値: 累積弧長 + 当該セグメント内の部分長
+  const segDx = curve[bestIdx + 1]!.x - curve[bestIdx]!.x;
+  const segDy = curve[bestIdx + 1]!.y - curve[bestIdx]!.y;
+  const segLen = Math.sqrt(segDx * segDx + segDy * segDy);
+  const s = cumS[bestIdx]! + bestT * segLen;
+
+  // L 値: 2D 外積で符号判定 (左=正)
+  const offX = p.x - bestPoint.x;
+  const offY = p.y - bestPoint.y;
+  const cross = segDx * offY - segDy * offX; // segDir × off の z 成分
+  const signedL = cross >= 0 ? bestD : -bestD;
+
+  return { valid: true, s, l: signedL, projection: bestPoint, segmentIndex: bestIdx };
+}
+
+// s 値配列と l 値配列から、指定 s 位置での l を線形補間で求める。
+// sArr は単調増加と仮定 (境界線が central_curve と同方向に敷かれていれば成立)。
+function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
+  valid: boolean; l: number; bracketMode: string;
+} {
+  if (sArr.length === 0 || lArr.length === 0) return { valid: false, l: 0, bracketMode: "empty" };
+  if (sArr.length === 1) return { valid: true, l: lArr[0]!, bracketMode: "single" };
+
+  if (targetS <= sArr[0]!) return { valid: true, l: lArr[0]!, bracketMode: "before_start" };
+  const last = sArr.length - 1;
+  if (targetS >= sArr[last]!) return { valid: true, l: lArr[last]!, bracketMode: "after_end" };
+
+  for (let i = 0; i < last; i++) {
+    const s0 = sArr[i]!; const s1 = sArr[i + 1]!;
+    if (s0 <= targetS && targetS <= s1) {
+      if (s1 === s0) return { valid: true, l: lArr[i]!, bracketMode: "zero_span" };
+      const frac = (targetS - s0) / (s1 - s0);
+      return { valid: true, l: lArr[i]! + frac * (lArr[i + 1]! - lArr[i]!), bracketMode: "interpolated" };
+    }
+  }
+  return { valid: true, l: lArr[last]!, bracketMode: "fallback" };
 }
 
 // --- モジュール変数 (bev_detection から保存) --------------------------------
@@ -318,6 +448,66 @@ export default function script(
     ? storedTargetLocalPos.y - selPoint.y - (storedTargetWidth * 0.5)
     : -9999;
 
+  // =========================================================================
+  // SL 座標系 (Frenet) への変換
+  // =========================================================================
+  const centralCurve: Vec3[] = segmentFound ? foundSeg!.central_curve : [];
+  const cumS = cumulativeS(centralCurve);
+  const centralLen = cumS.length > 0 ? cumS[cumS.length - 1]! : 0;
+
+  let slValid = false;
+  let targetS = 0; let targetL = 0;
+  let targetCentralProj = zeroVec3();
+  let targetCentralIdx = -1;
+  let leftLAtS = 0; let leftBracket = "none";
+  let rightLAtS = 0; let rightBracket = "none";
+  let distToLeftSL = 0; let distEdgeToLeftSL = 0;
+  let distToRightSL = 0; let distEdgeToRightSL = 0;
+
+  if (canCompute && centralCurve.length >= 2) {
+    const tSL = pointToSL(storedTargetLocalPos, centralCurve, cumS);
+    if (tSL.valid) {
+      slValid = true;
+      targetS = tSL.s; targetL = tSL.l;
+      targetCentralProj = tSL.projection;
+      targetCentralIdx = tSL.segmentIndex;
+
+      // 左境界線の各点を central_curve に投影して (s, l) 配列を作る
+      if (leftCurve.length > 0) {
+        const sArr: number[] = []; const lArr: number[] = [];
+        for (const pt of leftCurve) {
+          const r = pointToSL(pt, centralCurve, cumS);
+          if (r.valid) { sArr.push(r.s); lArr.push(r.l); }
+        }
+        const li = interpolateLAtS(targetS, sArr, lArr);
+        if (li.valid) {
+          leftLAtS = li.l;
+          leftBracket = li.bracketMode;
+          // 左白線は通常 L > targetL なので (leftL - targetL) が正
+          distToLeftSL = leftLAtS - targetL;
+          distEdgeToLeftSL = distToLeftSL - storedTargetWidth * 0.5;
+        }
+      }
+
+      // 右境界線も同様
+      if (rightCurve.length > 0) {
+        const sArr: number[] = []; const lArr: number[] = [];
+        for (const pt of rightCurve) {
+          const r = pointToSL(pt, centralCurve, cumS);
+          if (r.valid) { sArr.push(r.s); lArr.push(r.l); }
+        }
+        const ri = interpolateLAtS(targetS, sArr, lArr);
+        if (ri.valid) {
+          rightLAtS = ri.l;
+          rightBracket = ri.bracketMode;
+          // 右白線は通常 L < targetL なので (targetL - rightL) が正
+          distToRightSL = targetL - rightLAtS;
+          distEdgeToRightSL = distToRightSL - storedTargetWidth * 0.5;
+        }
+      }
+    }
+  }
+
   return {
     header: msg.header,
     lane_segment_id_input: segIdInput,
@@ -349,5 +539,19 @@ export default function script(
     distance_target_edge_to_selected_y_m: distEdgeToSelY,
     available_segments: availableSegments,
     available_segment_count: segments.length,
+    sl_valid: slValid,
+    central_curve_total_length_m: centralLen,
+    target_s_m: targetS,
+    target_l_m: targetL,
+    target_central_projection: targetCentralProj,
+    target_central_segment_index: targetCentralIdx,
+    left_boundary_l_at_target_s_m: leftLAtS,
+    left_boundary_l_bracket_mode: leftBracket,
+    distance_target_to_left_boundary_sl_m: distToLeftSL,
+    distance_target_edge_to_left_boundary_sl_m: distEdgeToLeftSL,
+    right_boundary_l_at_target_s_m: rightLAtS,
+    right_boundary_l_bracket_mode: rightBracket,
+    distance_target_to_right_boundary_sl_m: distToRightSL,
+    distance_target_edge_to_right_boundary_sl_m: distEdgeToRightSL,
   };
 }
