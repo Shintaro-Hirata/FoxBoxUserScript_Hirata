@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v7
+// Left boundary tracker + distance calculator  v7.1
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -47,7 +47,7 @@
 //   ---- SL 座標系 (v6) ----
 //   target_s_m / target_l_m              : central_curve を基準にした target の SL
 //   left_boundary_l_at_target_s_m        : target と同じ s 位置での左白線の L 値
-//   distance_target_to_left_boundary_sl_m: SL 空間での target → 左白線 横距離 (符号付き、左=正)
+//   distance_target_to_left_boundary_sl_m: targetL - leftL (Cartesian の target.y - boundary.y と同符号)
 //   distance_target_edge_to_left_boundary_sl_m: 上記から target.width/2 を引いた端-白線距離
 //   (right_boundary も同様)
 // ----------------------------------------------------------------------------
@@ -509,8 +509,8 @@ export default function script(
         if (li.valid) {
           leftLAtS = li.l;
           leftBracket = li.bracketMode;
-          // 左白線は通常 L > targetL なので (leftL - targetL) が正
-          distToLeftSL = leftLAtS - targetL;
+          // targetL - leftL: Cartesian の target.y - boundary.y と同じ符号方向
+          distToLeftSL = targetL - leftLAtS;
           distEdgeToLeftSL = distToLeftSL - effectiveWidth * 0.5;
         }
       }
