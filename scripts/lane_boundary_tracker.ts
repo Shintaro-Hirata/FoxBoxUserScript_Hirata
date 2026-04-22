@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v6
+// Left boundary tracker + distance calculator  v7
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -16,6 +16,11 @@
 //   v6     : SL 座標系 (Frenet) への変換を追加
 //            central_curve を基準に target/left/right boundary を s(弧長)/l(符号付き横距離)
 //            に変換し、SL 空間での車両端↔白線距離を出力する。
+//   v7     : 座標フレーム不一致の修正
+//            bev_detection (T1) の local_position と augmented_scene (T2) の central_curve
+//            は異なる時刻の車両フレームで、自車移動により SL 投影がずれる問題を修正。
+//            augmented_objects から同一 raw_id の bbox_info.local_position を取得し、
+//            augmented_scene と同一フレームで距離・SL 計算を行うようにした。
 //
 // 入力:   /t2/object_augmentor/augmented_scene
 //         /t2/bev_detection/objects
@@ -126,6 +131,9 @@ type Output = {
   target_object_local_position: Vec3;
   target_object_width: number;
   target_object_world_match_dist_m: number;
+  target_same_frame_match: boolean;
+  target_effective_local_position: Vec3;
+  target_effective_width: number;
   distance_computed: boolean;
   distance_to_left_boundary_m: number;
   nearest_point_on_left_curve: Vec3;
@@ -424,18 +432,36 @@ export default function script(
   const leftCurve: Vec3[] = segmentFound ? foundSeg!.left_boundary.curve : [];
   const rightCurve: Vec3[] = segmentFound ? foundSeg!.right_boundary.curve : [];
 
-  // 距離計算
+  // augmented_objects から同一フレームの local_position を取得 (SL 計算精度向上)
+  // bev_detection の raw_id で照合し、augmented_scene と同じ座標系にする
+  let effectiveLocalPos = copyVec3(storedTargetLocalPos);
+  let effectiveWidth = storedTargetWidth;
+  let sameFrameMatch = false;
+
+  if (storedTargetFound && storedTargetRawId >= 0) {
+    const augObjs: InAugObj[] = msg.augmented_objects ?? [];
+    for (const ao of augObjs) {
+      if (ao.bbox_info.id === storedTargetRawId && isValidVec3(ao.bbox_info.local_position)) {
+        effectiveLocalPos = copyVec3(ao.bbox_info.local_position as Vec3);
+        if (typeof ao.bbox_info.width === "number") effectiveWidth = ao.bbox_info.width;
+        sameFrameMatch = true;
+        break;
+      }
+    }
+  }
+
+  // 距離計算 (同一フレーム位置を使用)
   const canCompute = segmentFound && storedTargetFound;
   let distLeft = -1; let nearestLeft = zeroVec3(); let nearestLeftIdx = -1;
   let distRight = -1; let nearestRight = zeroVec3();
 
   if (canCompute) {
     if (leftCurve.length > 0) {
-      const rL = ptCurve(storedTargetLocalPos, leftCurve);
+      const rL = ptCurve(effectiveLocalPos, leftCurve);
       distLeft = rL.dist; nearestLeft = rL.point; nearestLeftIdx = rL.index;
     }
     if (rightCurve.length > 0) {
-      const rR = ptCurve(storedTargetLocalPos, rightCurve);
+      const rR = ptCurve(effectiveLocalPos, rightCurve);
       distRight = rR.dist; nearestRight = rR.point;
     }
   }
@@ -443,9 +469,9 @@ export default function script(
   // 指定 curve point
   const idxValid = wantIdx >= 0 && wantIdx < leftCurve.length;
   const selPoint = idxValid ? copyVec3(leftCurve[wantIdx]!) : zeroVec3();
-  const distToSel = (idxValid && storedTargetFound) ? dist3(storedTargetLocalPos, selPoint) : -1;
+  const distToSel = (idxValid && storedTargetFound) ? dist3(effectiveLocalPos, selPoint) : -1;
   const distEdgeToSelY = (idxValid && storedTargetFound)
-    ? storedTargetLocalPos.y - selPoint.y - (storedTargetWidth * 0.5)
+    ? effectiveLocalPos.y - selPoint.y - (effectiveWidth * 0.5)
     : -9999;
 
   // =========================================================================
@@ -465,7 +491,7 @@ export default function script(
   let distToRightSL = 0; let distEdgeToRightSL = 0;
 
   if (canCompute && centralCurve.length >= 2) {
-    const tSL = pointToSL(storedTargetLocalPos, centralCurve, cumS);
+    const tSL = pointToSL(effectiveLocalPos, centralCurve, cumS);
     if (tSL.valid) {
       slValid = true;
       targetS = tSL.s; targetL = tSL.l;
@@ -485,7 +511,7 @@ export default function script(
           leftBracket = li.bracketMode;
           // 左白線は通常 L > targetL なので (leftL - targetL) が正
           distToLeftSL = leftLAtS - targetL;
-          distEdgeToLeftSL = distToLeftSL - storedTargetWidth * 0.5;
+          distEdgeToLeftSL = distToLeftSL - effectiveWidth * 0.5;
         }
       }
 
@@ -502,7 +528,7 @@ export default function script(
           rightBracket = ri.bracketMode;
           // 右白線は通常 L < targetL なので (targetL - rightL) が正
           distToRightSL = targetL - rightLAtS;
-          distEdgeToRightSL = distToRightSL - storedTargetWidth * 0.5;
+          distEdgeToRightSL = distToRightSL - effectiveWidth * 0.5;
         }
       }
     }
@@ -526,6 +552,9 @@ export default function script(
     target_object_local_position: copyVec3(storedTargetLocalPos),
     target_object_width: storedTargetWidth,
     target_object_world_match_dist_m: storedTargetMatchDist,
+    target_same_frame_match: sameFrameMatch,
+    target_effective_local_position: copyVec3(effectiveLocalPos),
+    target_effective_width: effectiveWidth,
     distance_computed: canCompute,
     distance_to_left_boundary_m: distLeft,
     nearest_point_on_left_curve: nearestLeft,
