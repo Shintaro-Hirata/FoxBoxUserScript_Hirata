@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v9
+// Left boundary tracker + distance calculator  v9.1
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -29,6 +29,9 @@
 //            ego → target 方向に endpoint 近接で lane segment を順次結合し、
 //            1 本の長い central_curve / left / right boundary で SL 計算。
 //            これにより central_curve 全長 86m の制限を超えて 100m+ の S に対応。
+//   v9.1   : 双方向結合 (chainLaneBidir) に変更
+//            ego segment を常に +x 方向に固定し、前方・後方の両方向へ結合。
+//            ターゲットが後方にあるときも正しく S<0 を返す。
 //
 // 入力:   /t2/object_augmentor/augmented_scene
 //         /t2/bev_detection/objects
@@ -270,17 +273,17 @@ function cumulativeSFromEgo(c: Vec3[]): { cumS: number[]; egoClosestIdx: number 
   return { cumS, egoClosestIdx: egoIdx };
 }
 
-// --- セグメント結合 ---------------------------------------------------------
-// 自車 → ターゲット方向に連続する lane segment の central_curve / left / right を
-// endpoint 近接で結合し、1 本の長い polyline を作る。
-function chainLaneForward(
-  segments: InLaneSeg[], targetPos: Vec3
+// --- セグメント結合 (双方向) ------------------------------------------------
+// ego segment を +x 方向に固定し、前方・後方の両方向に endpoint 近接で lane segment
+// を結合して 1 本の長い polyline を作る。S=0(自車) を中心に前方=正, 後方=負。
+function chainLaneBidir(
+  segments: InLaneSeg[]
 ): { central: Vec3[]; left: Vec3[]; right: Vec3[]; count: number } {
   const empty = { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
   if (segments.length === 0) return empty;
-  const CONNECT = 10.0;
+  const THRESH = 10.0;
 
-  // ego segment: origin(0,0) に central_curve 上の点が最も近いセグメント
+  // ego segment: origin(0,0) に最も近い central_curve 点を持つセグメント
   let egoSeg: InLaneSeg | undefined;
   let egoMinD = Number.POSITIVE_INFINITY;
   for (const s of segments) {
@@ -291,8 +294,7 @@ function chainLaneForward(
   }
   if (!egoSeg || egoSeg.central_curve.length < 2) return empty;
 
-  // orient: 必要なら curve を反転し left/right を交換
-  function orient(s: InLaneSeg, rev: boolean): { cc: Vec3[]; lb: Vec3[]; rb: Vec3[] } {
+  function ori(s: InLaneSeg, rev: boolean): { cc: Vec3[]; lb: Vec3[]; rb: Vec3[] } {
     if (!rev) return {
       cc: s.central_curve.map(copyVec3),
       lb: s.left_boundary.curve.map(copyVec3),
@@ -305,43 +307,63 @@ function chainLaneForward(
     };
   }
 
-  // ego segment の向き: target に近い端が forward end
+  // ego segment を +x 方向に固定 (ターゲット方向ではなく道路前方)
   const ec = egoSeg.central_curve;
-  const egoRev = dist2D(ec[0]!, targetPos) < dist2D(ec[ec.length - 1]!, targetPos);
-  const ego = orient(egoSeg, egoRev);
-  let mCC = ego.cc; let mLB = ego.lb; let mRB = ego.rb;
+  const ego = ori(egoSeg, ec[ec.length - 1]!.x < ec[0]!.x);
   const used = new Set([egoSeg.id]);
 
-  // 前方へ結合
-  for (let iter = 0; iter < 50; iter++) {
-    const tip = mCC[mCC.length - 1]!;
-
-    let best: InLaneSeg | undefined;
-    let bestD = CONNECT; let bestRev = false;
+  // 前方結合: ego.cc[last] から +x 方向へ
+  let fCC: Vec3[] = []; let fLB: Vec3[] = []; let fRB: Vec3[] = [];
+  for (let n = 0; n < 30; n++) {
+    const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
+    let best: InLaneSeg | undefined; let bd = THRESH; let br = false;
     for (const s of segments) {
       if (used.has(s.id) || s.central_curve.length < 2) continue;
-      const sc = s.central_curve;
-      const d0 = dist2D(tip, sc[0]!);
-      const dN = dist2D(tip, sc[sc.length - 1]!);
-      if (d0 < bestD) { bestD = d0; best = s; bestRev = false; }
-      if (dN < bestD) { bestD = dN; best = s; bestRev = true; }
+      const c = s.central_curve;
+      const d0 = dist2D(tip, c[0]!); const dN = dist2D(tip, c[c.length - 1]!);
+      if (d0 < bd) { bd = d0; best = s; br = false; }
+      if (dN < bd) { bd = dN; best = s; br = true; }
     }
     if (!best) break;
-
-    const nx = orient(best, bestRev);
-    const skipCC = nx.cc.length > 0 && dist2D(nx.cc[0]!, tip) < 1.0 ? 1 : 0;
-    mCC = mCC.concat(nx.cc.slice(skipCC));
-    if (nx.lb.length > 0) {
-      const sk = mLB.length > 0 && dist2D(nx.lb[0]!, mLB[mLB.length - 1]!) < 1.0 ? 1 : 0;
-      mLB = mLB.concat(nx.lb.slice(sk));
-    }
-    if (nx.rb.length > 0) {
-      const sk = mRB.length > 0 && dist2D(nx.rb[0]!, mRB[mRB.length - 1]!) < 1.0 ? 1 : 0;
-      mRB = mRB.concat(nx.rb.slice(sk));
-    }
+    const nx = ori(best, br);
+    fCC = fCC.concat(nx.cc); fLB = fLB.concat(nx.lb); fRB = fRB.concat(nx.rb);
     used.add(best.id);
   }
-  return { central: mCC, left: mLB, right: mRB, count: used.size };
+
+  // 後方結合: ego.cc[0] から -x 方向へ (prepend)
+  let bCC: Vec3[] = []; let bLB: Vec3[] = []; let bRB: Vec3[] = [];
+  for (let n = 0; n < 30; n++) {
+    const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
+    let best: InLaneSeg | undefined; let bd = THRESH; let br = false;
+    for (const s of segments) {
+      if (used.has(s.id) || s.central_curve.length < 2) continue;
+      const c = s.central_curve;
+      const dLast = dist2D(tip, c[c.length - 1]!);
+      const dFirst = dist2D(tip, c[0]!);
+      if (dLast < bd) { bd = dLast; best = s; br = false; }
+      if (dFirst < bd) { bd = dFirst; best = s; br = true; }
+    }
+    if (!best) break;
+    const nx = ori(best, br);
+    bCC = nx.cc.concat(bCC); bLB = nx.lb.concat(bLB); bRB = nx.rb.concat(bRB);
+    used.add(best.id);
+  }
+
+  // 結合 + 近接点除去
+  function dedup(arr: Vec3[]): Vec3[] {
+    if (arr.length === 0) return [];
+    const out = [arr[0]!];
+    for (let i = 1; i < arr.length; i++) {
+      if (dist2D(arr[i]!, out[out.length - 1]!) > 0.5) out.push(arr[i]!);
+    }
+    return out;
+  }
+  return {
+    central: dedup(bCC.concat(ego.cc).concat(fCC)),
+    left: dedup(bLB.concat(ego.lb).concat(fLB)),
+    right: dedup(bRB.concat(ego.rb).concat(fRB)),
+    count: used.size,
+  };
 }
 
 // 点 p を central_curve に投影し、SL 座標を計算する。
@@ -584,9 +606,9 @@ export default function script(
   // =========================================================================
   // SL 座標系 (Frenet) への変換 — 複数セグメント結合, S=0 は自車最近傍点
   // =========================================================================
-  // ego → target 方向に lane segment を結合し、長い polyline で SL 計算
+  // ego → 前方/後方の両方向に lane segment を結合
   const chained = storedTargetFound
-    ? chainLaneForward(segments, effectiveLocalPos)
+    ? chainLaneBidir(segments)
     : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
   const centralCurve: Vec3[] = chained.central.length >= 2
     ? chained.central
