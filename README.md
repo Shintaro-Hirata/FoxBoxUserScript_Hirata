@@ -75,7 +75,8 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 |---|---|
 | `sl_valid` | SL 変換が成立した場合 true |
 | `central_curve_total_length_m` | `central_curve` 全体の弧長 [m] |
-| `target_s_m` | ターゲットの S 座標（central_curve 沿い弧長）[m] |
+| `ego_closest_curve_index` | S=0 とした `central_curve` 頂点のインデックス |
+| `target_s_m` | ターゲットの S 座標。S=0 は自車最近傍点。正=前方、負=後方 [m] |
 | `target_l_m` | ターゲットの L 座標（符号付き横距離）[m] |
 | `target_central_projection` | ターゲットを central_curve に投影した点の座標 |
 | `target_central_segment_index` | 投影先の polyline セグメント番号 |
@@ -100,39 +101,62 @@ SL 座標系は、道路の中心線（`central_curve`）を基準にした**曲
           L (横方向)
           ↑
           |
-          |    ● ターゲット (S=80.5, L=1.34)
+          |    ● ターゲット (S=+50, L=1.34)
           |
   --------+---------- central_curve (L=0)
           |
-          |
-          +----------→ S (道路沿い方向)
+   ← S<0  |  S>0 →
+          S=0
+        (自車最近傍)
 ```
 
-- **S (Longitudinal)**: `central_curve` の始点 `curve[0]` から polyline に沿って測った**累積弧長** [m]
+- **S (Station / Longitudinal)**: 自車（車両フレーム原点）に最も近い `central_curve` 頂点を **S=0** とし、polyline に沿って測った**符号付き弧長** [m]。正=curve 方向で前方、負=後方。
 - **L (Lateral)**: `central_curve` からの**符号付き垂直距離** [m]
 
-### ステップ 1: S 値の計算（累積弧長）
+> この S 原点規約は社内 Python 版 `vehicle_coord_to_sl` と同一です。`target_s_m ≈ 50` ならターゲットは道路沿いに約 50m 先にいます。
+
+### ステップ 1: S 値の計算（自車基準の累積弧長）
 
 `central_curve` は頂点の配列 `[P₀, P₁, P₂, ..., Pₙ]` で定義されます。各頂点間を直線で結んだ **polyline** を道路中心線とみなします。
 
-```
-P₀ ───── P₁ ───── P₂ ───── P₃ ───── P₄
-|  seg 0  |  seg 1  |  seg 2  |  seg 3  |
-0m       12m       25m       40m       52m   ← 累積弧長
-```
+#### 1-a. 標準累積弧長の計算
 
-各頂点の累積弧長は、前の頂点からの 2D 距離（x-y 平面）を足し合わせて求めます:
+まず `curve[0]` を起点にした標準累積弧長を求めます:
 
 ```
-cumS[0] = 0
-cumS[i] = cumS[i-1] + √((Pᵢ.x - Pᵢ₋₁.x)² + (Pᵢ.y - Pᵢ₋₁.y)²)
+raw[0] = 0
+raw[i] = raw[i-1] + √((Pᵢ.x - Pᵢ₋₁.x)² + (Pᵢ.y - Pᵢ₋₁.y)²)
 ```
 
-ターゲット点の S を求めるには:
+#### 1-b. 自車最近傍点の探索
+
+車両フレーム原点 (0, 0) に最も近い `central_curve` の**頂点**を探索します:
+
+```
+egoClosestIdx = argmin_i  √(Pᵢ.x² + Pᵢ.y²)
+```
+
+#### 1-c. S 原点をシフト
+
+標準累積弧長から自車最近傍点の値を引くことで、S=0 を自車位置に設定します:
+
+```
+cumS[i] = raw[i] − raw[egoClosestIdx]
+```
+
+```
+P₀ ───── P₁ ───── P₂(ego最近傍) ───── P₃ ───── P₄
+                    ↓ S=0
+-25m     -12m       0m               +15m      +27m   ← cumS
+```
+
+#### 1-d. ターゲットの S を求める
 
 1. ターゲットを各セグメント `Pᵢ → Pᵢ₊₁` に投影（2D 最近傍点探索）
 2. 最も近いセグメントを特定（セグメント番号 `i`、内分パラメータ `t ∈ [0, 1]`）
 3. `S = cumS[i] + t × |Pᵢ₊₁ − Pᵢ|`
+
+`S > 0` ならターゲットは自車より前方、`S < 0` なら後方です。
 
 ### ステップ 2: L 値の計算（符号付き横距離）
 
@@ -237,6 +261,7 @@ distance_target_edge_to_right_boundary_sl_m = target_l  −  right_boundary_l  �
 | **白線の指定** | `curve_point_index` で 1 点を手動選択 | ターゲットの S 位置で自動補間 |
 | **精度** | y 軸差分のみなので高速 | polyline 投影 + 外積で若干重い |
 | **推奨用途** | 特定の curve 頂点との距離を確認したい場合 | 停止車両 ↔ 白線の汎用的な距離計測 |
+| **S の原点** | ― | 自車最近傍点（S=0）。社内 Python 版と統一 |
 
 ### 座標フレームについて（v7〜）
 
@@ -265,6 +290,21 @@ lane_boundary_tracker.segment_found
 lane_boundary_tracker.sl_valid
 lane_boundary_tracker.target_same_frame_match
 ```
+
+### 50m / 100m 後方からの白線距離計測
+
+自車がターゲットに接近するログを再生すると、`target_s_m` はフレームごとに減少します:
+
+| 状態 | `target_s_m` の目安 |
+|---|---|
+| ターゲットの 100m 後方 | ≈ +100 |
+| ターゲットの 50m 後方 | ≈ +50 |
+| ターゲットの真横 | ≈ 0 |
+| ターゲットを通過 | < 0 |
+
+Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_left_boundary_sl_m`** を設定すると、各距離での白線距離がプロットできます。
+
+> `target_s_m` は直線距離ではなく**道路に沿った弧長**です。カーブがある場合、直線距離より大きくなります。
 
 ---
 

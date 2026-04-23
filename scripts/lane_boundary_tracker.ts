@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v7.1
+// Left boundary tracker + distance calculator  v8
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -21,6 +21,10 @@
 //            は異なる時刻の車両フレームで、自車移動により SL 投影がずれる問題を修正。
 //            augmented_objects から同一 raw_id の bbox_info.local_position を取得し、
 //            augmented_scene と同一フレームで距離・SL 計算を行うようにした。
+//   v7.1   : 左白線 SL 距離の符号修正 (leftL-targetL → targetL-leftL)
+//   v8     : S 原点を自車最近傍点に変更 (社内 Python 版 vehicle_coord_to_sl と統一)
+//            S=0 は自車原点 (0,0) に最も近い central_curve 頂点。
+//            前方 (curve 方向) が正、後方が負。target_s_m≈50 → 目標物は約 50m 先。
 //
 // 入力:   /t2/object_augmentor/augmented_scene
 //         /t2/bev_detection/objects
@@ -147,9 +151,10 @@ type Output = {
   distance_target_edge_to_selected_y_m: number;
   available_segments: SegmentSummary[];
   available_segment_count: number;
-  // ---- SL 座標系 (v6) ----
+  // ---- SL 座標系 ----
   sl_valid: boolean;
   central_curve_total_length_m: number;
+  ego_closest_curve_index: number;
   target_s_m: number;
   target_l_m: number;
   target_central_projection: Vec3;
@@ -223,18 +228,36 @@ function ptSegXYWithT(p: Vec3, a: Vec3, b: Vec3): {
   return { t, point: proj, dist2D: Math.sqrt(dx * dx + dy * dy) };
 }
 
-// central_curve 上の各頂点までの累積弧長 (2D) を返す。
-// 戻り値は length === curve.length で、cum[i] = curve[0]→curve[i] の弧長。
-function cumulativeS(c: Vec3[]): number[] {
-  const out: number[] = [];
-  if (c.length === 0) return out;
-  out.push(0);
+// central_curve 上の各頂点までの累積弧長 (2D) を、自車原点 (0,0) に最も近い頂点を
+// S=0 として返す。S=0 より前方 (curve 方向) は正、後方は負。
+// 社内 Python 版 vehicle_coord_to_sl と同一の S 原点規約。
+function cumulativeSFromEgo(c: Vec3[]): { cumS: number[]; egoClosestIdx: number } {
+  if (c.length === 0) return { cumS: [], egoClosestIdx: -1 };
+
+  // 標準累積弧長 (curve[0] = 0)
+  const raw: number[] = [0];
   for (let i = 1; i < c.length; i++) {
     const dx = c[i]!.x - c[i - 1]!.x;
     const dy = c[i]!.y - c[i - 1]!.y;
-    out.push(out[i - 1]! + Math.sqrt(dx * dx + dy * dy));
+    raw.push(raw[i - 1]! + Math.sqrt(dx * dx + dy * dy));
   }
-  return out;
+
+  // 自車原点 (0,0) に最も近い頂点を探索
+  let egoIdx = 0;
+  let egoMinD = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < c.length; i++) {
+    const d = c[i]!.x * c[i]!.x + c[i]!.y * c[i]!.y;
+    if (d < egoMinD) { egoMinD = d; egoIdx = i; }
+  }
+
+  // オフセットして S=0 を自車最近傍点に設定
+  const offset = raw[egoIdx]!;
+  const cumS: number[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    cumS.push(raw[i]! - offset);
+  }
+
+  return { cumS, egoClosestIdx: egoIdx };
 }
 
 // 点 p を central_curve に投影し、SL 座標を計算する。
@@ -475,11 +498,14 @@ export default function script(
     : -9999;
 
   // =========================================================================
-  // SL 座標系 (Frenet) への変換
+  // SL 座標系 (Frenet) への変換 — S=0 は自車最近傍点
   // =========================================================================
   const centralCurve: Vec3[] = segmentFound ? foundSeg!.central_curve : [];
-  const cumS = cumulativeS(centralCurve);
-  const centralLen = cumS.length > 0 ? cumS[cumS.length - 1]! : 0;
+  const { cumS, egoClosestIdx } = cumulativeSFromEgo(centralCurve);
+  // total length は先頭→末尾の絶対弧長 (S原点とは独立)
+  const centralLen = cumS.length >= 2
+    ? cumS[cumS.length - 1]! - cumS[0]!
+    : 0;
 
   let slValid = false;
   let targetS = 0; let targetL = 0;
@@ -570,6 +596,7 @@ export default function script(
     available_segment_count: segments.length,
     sl_valid: slValid,
     central_curve_total_length_m: centralLen,
+    ego_closest_curve_index: egoClosestIdx,
     target_s_m: targetS,
     target_l_m: targetL,
     target_central_projection: targetCentralProj,
