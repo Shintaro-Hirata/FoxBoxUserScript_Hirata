@@ -36,7 +36,9 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 **入力トピック**: `/t2/object_augmentor/augmented_scene`, `/t2/bev_detection/objects`  
 **出力トピック**: `/studio_script/lane_boundary_tracker`
 
-指定した世界座標のターゲット物体から、指定レーンセグメントの左右境界線（白線）までの距離を、直交座標系および SL 座標系（Frenet フレーム）で算出します。
+指定した世界座標のターゲット物体から、レーンセグメントの左右境界線（白線）までの距離を、直交座標系および SL 座標系（Frenet フレーム）で算出します。
+
+SL 計算では、自車〜ターゲット間を通る複数の `local_lane_segments` の `central_curve` / `left_boundary` / `right_boundary` を **endpoint 近接で自動結合**し、単一セグメントの長さ制限（≈86m）を超えて **100m 以上の距離**にも対応します。
 
 **Variables パネルで設定する変数:**
 
@@ -46,10 +48,10 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 | `target_y` | number | 同 y |
 | `target_z` | number | 同 z |
 | `threshold_m` | number | マッチング閾値 [m]（省略時 1.0m） |
-| `lane_segment_id` | string | 追跡するレーンセグメントの id（省略時は自動選択） |
-| `curve_point_index` | number | `left_boundary.curve` の配列インデックス（省略可） |
+| `lane_segment_id` | string | 追跡するレーンセグメントの id（省略時は自動選択、直交座標系のみ） |
+| `curve_point_index` | number | `left_boundary.curve` の配列インデックス（省略可、直交座標系のみ） |
 
-**セグメント自動選択ロジック:**
+**セグメント自動選択ロジック（直交座標系の距離計算用）:**
 1. `lane_segment_id` が設定されていれば id で完全一致検索
 2. 未設定 & ターゲット取得済み → `central_curve` への最短距離で自動選択
 3. 未設定 & ターゲットなし → `is_target_lane=true` を fallback
@@ -60,6 +62,8 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 
 ### 直交座標系（Cartesian）
 
+単一セグメントの curve を使用。`lane_segment_id` / `curve_point_index` で手動指定可能。
+
 | フィールド | 説明 |
 |---|---|
 | `distance_to_left_boundary_m` | ターゲット ↔ 左境界 curve 全体の最短距離 [m] |
@@ -69,20 +73,23 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 | `nearest_point_on_left_curve` | left_boundary polyline 上の最短点（頂点間の補間点） |
 | `available_segments` | 全 segment の id と距離一覧（id 確認・選択用） |
 
-### SL 座標系（Frenet フレーム, v6〜）
+### SL 座標系（Frenet フレーム）
+
+複数セグメントを自動結合した長い polyline を使用。100m+ の距離に対応。
 
 | フィールド | 説明 |
 |---|---|
 | `sl_valid` | SL 変換が成立した場合 true |
-| `central_curve_total_length_m` | `central_curve` 全体の弧長 [m] |
+| `chained_segment_count` | SL 計算に使用した結合セグメント数 |
+| `central_curve_total_length_m` | 結合後の `central_curve` 全体の弧長 [m] |
 | `ego_closest_curve_index` | S=0 とした `central_curve` 頂点のインデックス |
-| `target_s_m` | ターゲットの S 座標。S=0 は自車最近傍点。正=前方、負=後方 [m] |
+| `target_s_m` | ターゲットの S 座標。S=0 は自車位置。**正=前方、負=後方** [m] |
 | `target_l_m` | ターゲットの L 座標（符号付き横距離）[m] |
 | `target_central_projection` | ターゲットを central_curve に投影した点の座標 |
 | `target_central_segment_index` | 投影先の polyline セグメント番号 |
 | `left_boundary_l_at_target_s_m` | ターゲットと同じ S 位置での左白線 L 値（補間） |
 | `distance_target_to_left_boundary_sl_m` | `target_l − left_l`（中心→白線の横距離）|
-| `distance_target_edge_to_left_boundary_sl_m` | 上記 − `width/2`（車両端→白線距離）|
+| `distance_target_edge_to_left_boundary_sl_m` | 上記 − `width/2`（**車両端→白線距離**）|
 | `right_boundary_l_at_target_s_m` | 右白線の補間 L 値 |
 | `distance_target_to_right_boundary_sl_m` | `target_l − right_l` |
 | `distance_target_edge_to_right_boundary_sl_m` | 上記 − `width/2` |
@@ -110,14 +117,35 @@ SL 座標系は、道路の中心線（`central_curve`）を基準にした**曲
         (自車最近傍)
 ```
 
-- **S (Station / Longitudinal)**: 自車（車両フレーム原点）に最も近い `central_curve` 頂点を **S=0** とし、polyline に沿って測った**符号付き弧長** [m]。正=curve 方向で前方、負=後方。
-- **L (Lateral)**: `central_curve` からの**符号付き垂直距離** [m]
+- **S (Station / Longitudinal)**: 自車（車両フレーム原点）に最も近い `central_curve` 頂点を **S=0** とし、polyline に沿って測った**符号付き弧長** [m]。正=前方、負=後方。
+- **L (Lateral)**: ターゲットの **central_curve 上の投影点**からターゲットまの**符号付き垂直距離** [m]
 
 > この S 原点規約は社内 Python 版 `vehicle_coord_to_sl` と同一です。`target_s_m ≈ 50` ならターゲットは道路沿いに約 50m 先にいます。
 
+### ステップ 0: 複数セグメントの結合（v9〜）
+
+`local_lane_segments` の各セグメントは `central_curve` が約 86m と限られています。100m 以上離れたターゲットの SL を計算するため、**自車を起点に前方・後方の両方向**へセグメントを自動結合します。
+
+```
+後方結合(prepend)        ego segment (+x固定)        前方結合(append)
+seg_C → seg_B → seg_A → [ego_start ●(S=0) ego_end] → seg_D → seg_E
+       ← -x 方向                                      +x 方向 →
+```
+
+**結合アルゴリズム（`chainLaneBidir`）:**
+
+1. **ego segment の特定**: `central_curve` 上の点が車両原点 (0, 0) に最も近いセグメント
+2. **+x 方向に固定**: ego segment の curve を常に +x 方向（車両前方）に orient。逆方向の場合は curve を反転し、`left_boundary` と `right_boundary` を交換
+3. **前方結合**: ego の前方端 (last point) から、endpoint が 10m 以内にある次のセグメントを探索・結合。最大 30 回繰り返し
+4. **後方結合**: ego の後方端 (first point) から、同様に endpoint が 10m 以内のセグメントを探索・prepend
+5. **近接点除去**: 結合部で 0.5m 以内の重複点を除去
+6. 結合された polyline を `central_curve` / `left_boundary` / `right_boundary` として SL 計算に使用
+
+> **ポイント**: ego segment の向きは**ターゲット位置に依存しない**（常に +x 方向）ため、ターゲットが前方でも後方でも S の符号が一貫します。
+
 ### ステップ 1: S 値の計算（自車基準の累積弧長）
 
-`central_curve` は頂点の配列 `[P₀, P₁, P₂, ..., Pₙ]` で定義されます。各頂点間を直線で結んだ **polyline** を道路中心線とみなします。
+結合済みの `central_curve` の頂点配列 `[P₀, P₁, P₂, ..., Pₙ]` に対して S を計算します。
 
 #### 1-a. 標準累積弧長の計算
 
@@ -145,9 +173,10 @@ cumS[i] = raw[i] − raw[egoClosestIdx]
 ```
 
 ```
-P₀ ───── P₁ ───── P₂(ego最近傍) ───── P₃ ───── P₄
+(後方seg)           (ego seg)                    (前方seg)
+P₀ ───── P₁ ───── P₂(ego最近傍) ───── P₃ ───── P₄ ───── P₅
                     ↓ S=0
--25m     -12m       0m               +15m      +27m   ← cumS
+-120m    -80m       0m               +40m      +80m     +150m   ← cumS
 ```
 
 #### 1-d. ターゲットの S を求める
@@ -193,7 +222,7 @@ L < 0  ←  cross < 0（セグメント進行方向の右側）
 
 ### ステップ 3: 白線の L 値を補間
 
-左右の白線（`left_boundary.curve`, `right_boundary.curve`）の各頂点を同様に `central_curve` に投影し、`(S, L)` の配列を作ります。
+左右の白線（結合済みの `left_boundary` / `right_boundary`）の各頂点を同様に `central_curve` に投影し、`(S, L)` の配列を作ります。
 
 ```
 左白線の頂点 B₀, B₁, B₂, ... を central_curve に投影:
@@ -261,6 +290,7 @@ distance_target_edge_to_right_boundary_sl_m = target_l  −  right_boundary_l  �
 | **白線の指定** | `curve_point_index` で 1 点を手動選択 | ターゲットの S 位置で自動補間 |
 | **精度** | y 軸差分のみなので高速 | polyline 投影 + 外積で若干重い |
 | **推奨用途** | 特定の curve 頂点との距離を確認したい場合 | 停止車両 ↔ 白線の汎用的な距離計測 |
+| **使用セグメント** | 単一セグメント | 複数セグメント自動結合（100m+ 対応） |
 | **S の原点** | ― | 自車最近傍点（S=0）。社内 Python 版と統一 |
 
 ### 座標フレームについて（v7〜）
@@ -284,10 +314,12 @@ lane_boundary_tracker.target_l_m
 lane_boundary_tracker.distance_to_left_boundary_m
 lane_boundary_tracker.distance_target_edge_to_selected_y_m
 
-# 状態フラグ
+# 状態フラグ・デバッグ
 lane_boundary_tracker.target_object_found
 lane_boundary_tracker.segment_found
 lane_boundary_tracker.sl_valid
+lane_boundary_tracker.chained_segment_count
+lane_boundary_tracker.central_curve_total_length_m
 lane_boundary_tracker.target_same_frame_match
 ```
 
@@ -300,7 +332,7 @@ lane_boundary_tracker.target_same_frame_match
 | ターゲットの 100m 後方 | ≈ +100 |
 | ターゲットの 50m 後方 | ≈ +50 |
 | ターゲットの真横 | ≈ 0 |
-| ターゲットを通過 | < 0 |
+| ターゲットを通過 | < 0（負値が維持される） |
 
 Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_left_boundary_sl_m`** を設定すると、各距離での白線距離がプロットできます。
 
@@ -310,11 +342,18 @@ Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_le
 
 ## 制約と注意事項
 
-- `central_curve` はセグメント単位で定義されるため、セグメントをまたぐと S 値がリセットされます
+### SL 座標系
+
+- セグメント結合は endpoint 間の距離が **10m 以内**の場合に接続します。10m 以上離れたセグメント間には gap が生じます
+- 結合は自車レーンを基準に前方・後方へ伸ばすため、**自車が走行中のレーン**のセグメントが結合対象です
 - SL 変換は 2D（x-y 平面）で計算しています。勾配のある道路では若干の誤差が生じます
 - 左/右白線の S 値が単調増加であることを前提に線形補間しています
 - `bracket_mode = before_start / after_end` の場合、target の S 位置が白線の S 範囲外（外挿相当）なので値の信頼性は低下します
 - `central_curve` の方向が道路走行方向と逆の場合がありますが、距離計算は `target_l − boundary_l` の差分で符号を相殺するため、結果に影響しません
+- セグメント反転時に `left_boundary` と `right_boundary` を自動交換します
+
+### 一般
+
 - トークン等の認証情報をスクリプト内に記載しないでください
 - FoxBox の User Scripts エディタに貼り付けて使用します
 - `Output | undefined` は FoxBox が許可する唯一の union 型です（multi-input スクリプトで使用）
