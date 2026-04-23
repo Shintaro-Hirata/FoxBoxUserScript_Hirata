@@ -601,7 +601,7 @@ export default function script(
   const distToSel = (idxValid && storedTargetFound) ? dist3(effectiveLocalPos, selPoint) : -1;
   const distEdgeToSelY = (idxValid && storedTargetFound)
     ? effectiveLocalPos.y - selPoint.y - (effectiveWidth * 0.5)
-    : -9999;
+    : 0;
 
   // =========================================================================
   // SL 座標系 (Frenet) への変換 — 複数セグメント結合, S=0 は自車最近傍点
