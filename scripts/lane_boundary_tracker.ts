@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v12
+// Left boundary tracker + distance calculator  v12.1
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -731,19 +731,14 @@ export default function script(
   // =========================================================================
   // central_curve の選択 (優先順):
   //   (1) lane_creator/output の lane_center_curve (レーン全体, 高精度)
-  //   (2) chainLaneBidir による複数セグメント結合
-  //   (3) 単一セグメントの central_curve (フォールバック)
-  const chained = storedTargetFound && storedLaneCenterCurve.length < 2
-    ? chainLaneBidir(segments)
-    : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
+  //   (2) 単一セグメントの central_curve (フォールバック: Seek 直後など)
+  // ※ chainLaneBidir は lane_creator 未受信時の品質が不安定なため廃止
   const centralCurve: Vec3[] = storedLaneCenterCurve.length >= 2
     ? storedLaneCenterCurve
-    : chained.central.length >= 2
-      ? chained.central
-      : (segmentFound ? foundSeg!.central_curve : []);
+    : (segmentFound ? foundSeg!.central_curve : []);
   // 白線は引き続き augmented_scene から取得 (lane_creator には含まれない)
-  const slLeftCurve: Vec3[] = chained.left.length > 0 ? chained.left : leftCurve;
-  const slRightCurve: Vec3[] = chained.right.length > 0 ? chained.right : rightCurve;
+  const slLeftCurve: Vec3[] = leftCurve;
+  const slRightCurve: Vec3[] = rightCurve;
   const { cumS, egoClosestIdx } = cumulativeSFromEgo(centralCurve);
   // total length は先頭→末尾の絶対弧長 (S原点とは独立)
   const centralLen = cumS.length >= 2
@@ -837,9 +832,9 @@ export default function script(
     available_segments: availableSegments,
     available_segment_count: segments.length,
     sl_valid: slValid,
-    sl_central_curve_source: storedLaneCenterCurve.length >= 2 ? "lane_creator"
-      : chained.central.length >= 2 ? "chained_segments" : "single_segment",
-    chained_segment_count: chained.count,
+    sl_central_curve_source: storedLaneCenterCurve.length >= 2
+      ? "lane_creator" : "single_segment",
+    chained_segment_count: 0,
     central_curve_total_length_m: centralLen,
     central_curve_point_count: centralCurve.length,
     ego_closest_curve_index: egoClosestIdx,
