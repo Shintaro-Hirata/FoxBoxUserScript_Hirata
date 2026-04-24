@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v12.1
+// Left boundary tracker + distance calculator  v12.2
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -394,20 +394,11 @@ function chainLaneBidir(
     let next = findByIds(succIds, used);
     let nextRev = false;
 
-    if (next) {
-      // orient: next の先頭が chain tip に近ければそのまま、末尾が近ければ反転
-      const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
-      const nc = next.central_curve;
-      nextRev = dist2D(tip, nc[nc.length - 1]!) < dist2D(tip, nc[0]!);
-    } else {
-      // (2)(3) endpoint フォールバック
-      const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
-      const prev = fCC.length > 1 ? fCC[fCC.length - 2]!
-                 : ego.cc.length > 1 ? ego.cc[ego.cc.length - 2]! : tip;
-      const found = findByEndpoint(tip, prev, used, "fwd");
-      if (!found) break;
-      next = found.seg; nextRev = found.rev;
-    }
+    if (!next) break; // ID がなければ結合停止 (endpoint フォールバックなし)
+    // orient: next の先頭が chain tip に近ければそのまま、末尾が近ければ反転
+    const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
+    const nc = next.central_curve;
+    nextRev = dist2D(tip, nc[nc.length - 1]!) < dist2D(tip, nc[0]!);
 
     const nx = ori(next, nextRev);
     fCC = fCC.concat(nx.cc); fLB = fLB.concat(nx.lb); fRB = fRB.concat(nx.rb);
@@ -424,18 +415,10 @@ function chainLaneBidir(
     let next = findByIds(predIds, used);
     let nextRev = false;
 
-    if (next) {
-      const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
-      const nc = next.central_curve;
-      nextRev = dist2D(tip, nc[0]!) < dist2D(tip, nc[nc.length - 1]!);
-    } else {
-      const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
-      const prev = bCC.length > 1 ? bCC[1]!
-                 : ego.cc.length > 1 ? ego.cc[1]! : tip;
-      const found = findByEndpoint(tip, prev, used, "bwd");
-      if (!found) break;
-      next = found.seg; nextRev = found.rev;
-    }
+    if (!next) break; // ID がなければ結合停止
+    const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
+    const nc = next.central_curve;
+    nextRev = dist2D(tip, nc[0]!) < dist2D(tip, nc[nc.length - 1]!);
 
     const nx = ori(next, nextRev);
     bCC = nx.cc.concat(bCC); bLB = nx.lb.concat(bLB); bRB = nx.rb.concat(bRB);
@@ -731,14 +714,21 @@ export default function script(
   // =========================================================================
   // central_curve の選択 (優先順):
   //   (1) lane_creator/output の lane_center_curve (レーン全体, 高精度)
-  //   (2) 単一セグメントの central_curve (フォールバック: Seek 直後など)
-  // ※ chainLaneBidir は lane_creator 未受信時の品質が不安定なため廃止
+  //   (2) chainLaneBidir (ID ベースのみ, Seek 直後のフォールバック)
+  //   (3) 単一セグメントの central_curve (最終フォールバック)
+  const chained = storedLaneCenterCurve.length < 2 && storedTargetFound
+    ? chainLaneBidir(segments)
+    : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
   const centralCurve: Vec3[] = storedLaneCenterCurve.length >= 2
     ? storedLaneCenterCurve
-    : (segmentFound ? foundSeg!.central_curve : []);
+    : chained.central.length >= 2
+      ? chained.central
+      : (segmentFound ? foundSeg!.central_curve : []);
+  const curveSource = storedLaneCenterCurve.length >= 2 ? "lane_creator"
+    : chained.central.length >= 2 ? "chained_id" : "single_segment";
   // 白線は引き続き augmented_scene から取得 (lane_creator には含まれない)
-  const slLeftCurve: Vec3[] = leftCurve;
-  const slRightCurve: Vec3[] = rightCurve;
+  const slLeftCurve: Vec3[] = chained.left.length > 0 ? chained.left : leftCurve;
+  const slRightCurve: Vec3[] = chained.right.length > 0 ? chained.right : rightCurve;
   const { cumS, egoClosestIdx } = cumulativeSFromEgo(centralCurve);
   // total length は先頭→末尾の絶対弧長 (S原点とは独立)
   const centralLen = cumS.length >= 2
@@ -832,9 +822,8 @@ export default function script(
     available_segments: availableSegments,
     available_segment_count: segments.length,
     sl_valid: slValid,
-    sl_central_curve_source: storedLaneCenterCurve.length >= 2
-      ? "lane_creator" : "single_segment",
-    chained_segment_count: 0,
+    sl_central_curve_source: curveSource,
+    chained_segment_count: chained.count,
     central_curve_total_length_m: centralLen,
     central_curve_point_count: centralCurve.length,
     ego_closest_curve_index: egoClosestIdx,
