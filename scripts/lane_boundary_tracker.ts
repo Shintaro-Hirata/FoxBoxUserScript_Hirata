@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v10
+// Left boundary tracker + distance calculator  v11
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -36,6 +36,9 @@
 //            (1) road_id が利用可能なら同一 road_id のセグメントのみ結合
 //            (2) road_id なしでも横方向チェック (perpDist < 3m) で他車線を排除
 //            (3) 近接点除去閾値を 0.5m → 0.01m に縮小 (S 精度維持)
+//   v11    : successor_ids / predecessor_ids による ID ベース結合を優先
+//            データに接続情報があれば ID で正確に次セグメントを辿る。
+//            なければ road_id → endpoint + 横方向チェックにフォールバック。
 //
 // 入力:   /t2/object_augmentor/augmented_scene
 //         /t2/bev_detection/objects
@@ -116,6 +119,8 @@ type InAugObj = {
 type InLaneSeg = {
   id: string;
   road_id?: string;
+  successor_ids?: string[];
+  predecessor_ids?: string[];
   central_curve: Vec3[];
   left_boundary: { curve: Vec3[] };
   right_boundary: { curve: Vec3[] };
@@ -280,9 +285,10 @@ function cumulativeSFromEgo(c: Vec3[]): { cumS: number[]; egoClosestIdx: number 
 
 // --- セグメント結合 (双方向) ------------------------------------------------
 // ego segment を +x 方向に固定し、前方・後方の両方向に lane segment を結合する。
-// 結合候補の選別:
-//   (1) road_id が利用可能 → ego と同一 road_id のセグメントのみ
-//   (2) road_id なし → endpoint 近接 + 横方向チェック (perpDist < 3m) で他車線を排除
+// 結合候補の選別 (優先順):
+//   (1) successor_ids / predecessor_ids → ID ベースで直接接続 (最も正確)
+//   (2) road_id → 同一 road_id + endpoint 近接
+//   (3) endpoint 近接 + 横方向チェック (perpDist < 3m) で他車線を排除
 function chainLaneBidir(
   segments: InLaneSeg[]
 ): { central: Vec3[]; left: Vec3[]; right: Vec3[]; count: number } {
@@ -290,6 +296,10 @@ function chainLaneBidir(
   if (segments.length === 0) return empty;
   const CONNECT_THRESH = 10.0;
   const LATERAL_THRESH = 3.0;
+
+  // segment を id で引くための Map
+  const segById = new Map<string, InLaneSeg>();
+  for (const s of segments) { segById.set(s.id, s); }
 
   // ego segment: origin(0,0) に最も近い central_curve 点を持つセグメント
   let egoSeg: InLaneSeg | undefined;
@@ -302,6 +312,8 @@ function chainLaneBidir(
   }
   if (!egoSeg || egoSeg.central_curve.length < 2) return empty;
 
+  // successor_ids / predecessor_ids が利用可能か判定
+  const hasConnectivity = Array.isArray(egoSeg.successor_ids) || Array.isArray(egoSeg.predecessor_ids);
   const egoRoadId = typeof egoSeg.road_id === "string" && egoSeg.road_id.length > 0
     ? egoSeg.road_id : "";
 
@@ -318,71 +330,111 @@ function chainLaneBidir(
     };
   }
 
-  // セグメントが同一道路かチェック
-  function isSameRoad(s: InLaneSeg): boolean {
-    if (egoRoadId.length > 0) {
-      return typeof s.road_id === "string" && s.road_id === egoRoadId;
+  // ID ベースで次のセグメントを探索 (successor_ids から未使用の最初の 1 つ)
+  function findByIds(ids: string[] | undefined, usedSet: Set<string>): InLaneSeg | undefined {
+    if (!Array.isArray(ids)) return undefined;
+    for (const sid of ids) {
+      if (usedSet.has(sid)) continue;
+      const found = segById.get(sid);
+      if (found && found.central_curve.length >= 2) return found;
     }
-    return true; // road_id なし → endpoint + 横方向チェックで判定
+    return undefined;
   }
 
-  // 候補 endpoint の横方向チェック: chain 末尾の進行方向に対し垂直距離が閾値以内か
-  function isLateralOk(tip: Vec3, prev: Vec3, candidate: Vec3): boolean {
-    if (egoRoadId.length > 0) return true; // road_id で選別済み
+  // endpoint 近接フォールバック: road_id + 横方向チェック付き
+  function findByEndpoint(
+    tip: Vec3, prev: Vec3, usedSet: Set<string>, mode: "fwd" | "bwd"
+  ): { seg: InLaneSeg; rev: boolean } | undefined {
+    let best: InLaneSeg | undefined; let bd = CONNECT_THRESH; let br = false;
+    for (const s of segments) {
+      if (usedSet.has(s.id) || s.central_curve.length < 2) continue;
+      if (egoRoadId.length > 0 && s.road_id !== egoRoadId) continue;
+      const c = s.central_curve;
+      if (mode === "fwd") {
+        const d0 = dist2D(tip, c[0]!); const dN = dist2D(tip, c[c.length - 1]!);
+        if (d0 < bd && lateralOk(tip, prev, c[0]!)) { bd = d0; best = s; br = false; }
+        if (dN < bd && lateralOk(tip, prev, c[c.length - 1]!)) { bd = dN; best = s; br = true; }
+      } else {
+        const dL = dist2D(tip, c[c.length - 1]!); const dF = dist2D(tip, c[0]!);
+        if (dL < bd && lateralOk(tip, prev, c[c.length - 1]!)) { bd = dL; best = s; br = false; }
+        if (dF < bd && lateralOk(tip, prev, c[0]!)) { bd = dF; best = s; br = true; }
+      }
+    }
+    return best ? { seg: best, rev: br } : undefined;
+  }
+
+  function lateralOk(tip: Vec3, prev: Vec3, candidate: Vec3): boolean {
+    if (egoRoadId.length > 0 || hasConnectivity) return true;
     const dx = tip.x - prev.x; const dy = tip.y - prev.y;
     const dirLen = Math.sqrt(dx * dx + dy * dy);
     if (dirLen < 0.01) return true;
     const cx = candidate.x - tip.x; const cy = candidate.y - tip.y;
-    const perpDist = Math.abs(dx * cy - dy * cx) / dirLen;
-    return perpDist < LATERAL_THRESH;
+    return Math.abs(dx * cy - dy * cx) / dirLen < LATERAL_THRESH;
   }
 
   // ego segment を +x 方向に固定
   const ec = egoSeg.central_curve;
-  const ego = ori(egoSeg, ec[ec.length - 1]!.x < ec[0]!.x);
+  const egoRev = ec[ec.length - 1]!.x < ec[0]!.x;
+  const ego = ori(egoSeg, egoRev);
   const used = new Set([egoSeg.id]);
 
-  // 前方結合: ego.cc[last] から +x 方向へ
+  // 前方結合
   let fCC: Vec3[] = []; let fLB: Vec3[] = []; let fRB: Vec3[] = [];
+  let curSeg = egoSeg;
+  let curRev = egoRev;
   for (let n = 0; n < 30; n++) {
-    const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
-    const prev = fCC.length > 1 ? fCC[fCC.length - 2]!
-               : ego.cc.length > 1 ? ego.cc[ego.cc.length - 2]! : tip;
-    let best: InLaneSeg | undefined; let bd = CONNECT_THRESH; let br = false;
-    for (const s of segments) {
-      if (used.has(s.id) || s.central_curve.length < 2) continue;
-      if (!isSameRoad(s)) continue;
-      const c = s.central_curve;
-      const d0 = dist2D(tip, c[0]!); const dN = dist2D(tip, c[c.length - 1]!);
-      if (d0 < bd && isLateralOk(tip, prev, c[0]!)) { bd = d0; best = s; br = false; }
-      if (dN < bd && isLateralOk(tip, prev, c[c.length - 1]!)) { bd = dN; best = s; br = true; }
+    // (1) successor_ids で探索
+    const succIds = curRev ? curSeg.predecessor_ids : curSeg.successor_ids;
+    let next = findByIds(succIds, used);
+    let nextRev = false;
+
+    if (next) {
+      // orient: next の先頭が chain tip に近ければそのまま、末尾が近ければ反転
+      const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
+      const nc = next.central_curve;
+      nextRev = dist2D(tip, nc[nc.length - 1]!) < dist2D(tip, nc[0]!);
+    } else {
+      // (2)(3) endpoint フォールバック
+      const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
+      const prev = fCC.length > 1 ? fCC[fCC.length - 2]!
+                 : ego.cc.length > 1 ? ego.cc[ego.cc.length - 2]! : tip;
+      const found = findByEndpoint(tip, prev, used, "fwd");
+      if (!found) break;
+      next = found.seg; nextRev = found.rev;
     }
-    if (!best) break;
-    const nx = ori(best, br);
+
+    const nx = ori(next, nextRev);
     fCC = fCC.concat(nx.cc); fLB = fLB.concat(nx.lb); fRB = fRB.concat(nx.rb);
-    used.add(best.id);
+    used.add(next.id);
+    curSeg = next; curRev = nextRev;
   }
 
-  // 後方結合: ego.cc[0] から -x 方向へ (prepend)
+  // 後方結合 (prepend)
   let bCC: Vec3[] = []; let bLB: Vec3[] = []; let bRB: Vec3[] = [];
+  curSeg = egoSeg; curRev = egoRev;
   for (let n = 0; n < 30; n++) {
-    const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
-    const prev = bCC.length > 1 ? bCC[1]!
-               : ego.cc.length > 1 ? ego.cc[1]! : tip;
-    let best: InLaneSeg | undefined; let bd = CONNECT_THRESH; let br = false;
-    for (const s of segments) {
-      if (used.has(s.id) || s.central_curve.length < 2) continue;
-      if (!isSameRoad(s)) continue;
-      const c = s.central_curve;
-      const dLast = dist2D(tip, c[c.length - 1]!);
-      const dFirst = dist2D(tip, c[0]!);
-      if (dLast < bd && isLateralOk(tip, prev, c[c.length - 1]!)) { bd = dLast; best = s; br = false; }
-      if (dFirst < bd && isLateralOk(tip, prev, c[0]!)) { bd = dFirst; best = s; br = true; }
+    // (1) predecessor_ids で探索
+    const predIds = curRev ? curSeg.successor_ids : curSeg.predecessor_ids;
+    let next = findByIds(predIds, used);
+    let nextRev = false;
+
+    if (next) {
+      const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
+      const nc = next.central_curve;
+      nextRev = dist2D(tip, nc[0]!) < dist2D(tip, nc[nc.length - 1]!);
+    } else {
+      const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
+      const prev = bCC.length > 1 ? bCC[1]!
+                 : ego.cc.length > 1 ? ego.cc[1]! : tip;
+      const found = findByEndpoint(tip, prev, used, "bwd");
+      if (!found) break;
+      next = found.seg; nextRev = found.rev;
     }
-    if (!best) break;
-    const nx = ori(best, br);
+
+    const nx = ori(next, nextRev);
     bCC = nx.cc.concat(bCC); bLB = nx.lb.concat(bLB); bRB = nx.rb.concat(bRB);
-    used.add(best.id);
+    used.add(next.id);
+    curSeg = next; curRev = nextRev;
   }
 
   // 結合 + 近接点除去 (ほぼ完全一致の重複のみ除去, S 精度を維持)
