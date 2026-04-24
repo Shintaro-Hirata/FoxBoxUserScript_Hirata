@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v9.1
+// Left boundary tracker + distance calculator  v10
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -32,6 +32,10 @@
 //   v9.1   : 双方向結合 (chainLaneBidir) に変更
 //            ego segment を常に +x 方向に固定し、前方・後方の両方向へ結合。
 //            ターゲットが後方にあるときも正しく S<0 を返す。
+//   v10    : セグメント結合の精度向上
+//            (1) road_id が利用可能なら同一 road_id のセグメントのみ結合
+//            (2) road_id なしでも横方向チェック (perpDist < 3m) で他車線を排除
+//            (3) 近接点除去閾値を 0.5m → 0.01m に縮小 (S 精度維持)
 //
 // 入力:   /t2/object_augmentor/augmented_scene
 //         /t2/bev_detection/objects
@@ -111,6 +115,7 @@ type InAugObj = {
 
 type InLaneSeg = {
   id: string;
+  road_id?: string;
   central_curve: Vec3[];
   left_boundary: { curve: Vec3[] };
   right_boundary: { curve: Vec3[] };
@@ -274,14 +279,17 @@ function cumulativeSFromEgo(c: Vec3[]): { cumS: number[]; egoClosestIdx: number 
 }
 
 // --- セグメント結合 (双方向) ------------------------------------------------
-// ego segment を +x 方向に固定し、前方・後方の両方向に endpoint 近接で lane segment
-// を結合して 1 本の長い polyline を作る。S=0(自車) を中心に前方=正, 後方=負。
+// ego segment を +x 方向に固定し、前方・後方の両方向に lane segment を結合する。
+// 結合候補の選別:
+//   (1) road_id が利用可能 → ego と同一 road_id のセグメントのみ
+//   (2) road_id なし → endpoint 近接 + 横方向チェック (perpDist < 3m) で他車線を排除
 function chainLaneBidir(
   segments: InLaneSeg[]
 ): { central: Vec3[]; left: Vec3[]; right: Vec3[]; count: number } {
   const empty = { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
   if (segments.length === 0) return empty;
-  const THRESH = 10.0;
+  const CONNECT_THRESH = 10.0;
+  const LATERAL_THRESH = 3.0;
 
   // ego segment: origin(0,0) に最も近い central_curve 点を持つセグメント
   let egoSeg: InLaneSeg | undefined;
@@ -293,6 +301,9 @@ function chainLaneBidir(
     }
   }
   if (!egoSeg || egoSeg.central_curve.length < 2) return empty;
+
+  const egoRoadId = typeof egoSeg.road_id === "string" && egoSeg.road_id.length > 0
+    ? egoSeg.road_id : "";
 
   function ori(s: InLaneSeg, rev: boolean): { cc: Vec3[]; lb: Vec3[]; rb: Vec3[] } {
     if (!rev) return {
@@ -307,7 +318,26 @@ function chainLaneBidir(
     };
   }
 
-  // ego segment を +x 方向に固定 (ターゲット方向ではなく道路前方)
+  // セグメントが同一道路かチェック
+  function isSameRoad(s: InLaneSeg): boolean {
+    if (egoRoadId.length > 0) {
+      return typeof s.road_id === "string" && s.road_id === egoRoadId;
+    }
+    return true; // road_id なし → endpoint + 横方向チェックで判定
+  }
+
+  // 候補 endpoint の横方向チェック: chain 末尾の進行方向に対し垂直距離が閾値以内か
+  function isLateralOk(tip: Vec3, prev: Vec3, candidate: Vec3): boolean {
+    if (egoRoadId.length > 0) return true; // road_id で選別済み
+    const dx = tip.x - prev.x; const dy = tip.y - prev.y;
+    const dirLen = Math.sqrt(dx * dx + dy * dy);
+    if (dirLen < 0.01) return true;
+    const cx = candidate.x - tip.x; const cy = candidate.y - tip.y;
+    const perpDist = Math.abs(dx * cy - dy * cx) / dirLen;
+    return perpDist < LATERAL_THRESH;
+  }
+
+  // ego segment を +x 方向に固定
   const ec = egoSeg.central_curve;
   const ego = ori(egoSeg, ec[ec.length - 1]!.x < ec[0]!.x);
   const used = new Set([egoSeg.id]);
@@ -316,13 +346,16 @@ function chainLaneBidir(
   let fCC: Vec3[] = []; let fLB: Vec3[] = []; let fRB: Vec3[] = [];
   for (let n = 0; n < 30; n++) {
     const tip = fCC.length > 0 ? fCC[fCC.length - 1]! : ego.cc[ego.cc.length - 1]!;
-    let best: InLaneSeg | undefined; let bd = THRESH; let br = false;
+    const prev = fCC.length > 1 ? fCC[fCC.length - 2]!
+               : ego.cc.length > 1 ? ego.cc[ego.cc.length - 2]! : tip;
+    let best: InLaneSeg | undefined; let bd = CONNECT_THRESH; let br = false;
     for (const s of segments) {
       if (used.has(s.id) || s.central_curve.length < 2) continue;
+      if (!isSameRoad(s)) continue;
       const c = s.central_curve;
       const d0 = dist2D(tip, c[0]!); const dN = dist2D(tip, c[c.length - 1]!);
-      if (d0 < bd) { bd = d0; best = s; br = false; }
-      if (dN < bd) { bd = dN; best = s; br = true; }
+      if (d0 < bd && isLateralOk(tip, prev, c[0]!)) { bd = d0; best = s; br = false; }
+      if (dN < bd && isLateralOk(tip, prev, c[c.length - 1]!)) { bd = dN; best = s; br = true; }
     }
     if (!best) break;
     const nx = ori(best, br);
@@ -334,14 +367,17 @@ function chainLaneBidir(
   let bCC: Vec3[] = []; let bLB: Vec3[] = []; let bRB: Vec3[] = [];
   for (let n = 0; n < 30; n++) {
     const tip = bCC.length > 0 ? bCC[0]! : ego.cc[0]!;
-    let best: InLaneSeg | undefined; let bd = THRESH; let br = false;
+    const prev = bCC.length > 1 ? bCC[1]!
+               : ego.cc.length > 1 ? ego.cc[1]! : tip;
+    let best: InLaneSeg | undefined; let bd = CONNECT_THRESH; let br = false;
     for (const s of segments) {
       if (used.has(s.id) || s.central_curve.length < 2) continue;
+      if (!isSameRoad(s)) continue;
       const c = s.central_curve;
       const dLast = dist2D(tip, c[c.length - 1]!);
       const dFirst = dist2D(tip, c[0]!);
-      if (dLast < bd) { bd = dLast; best = s; br = false; }
-      if (dFirst < bd) { bd = dFirst; best = s; br = true; }
+      if (dLast < bd && isLateralOk(tip, prev, c[c.length - 1]!)) { bd = dLast; best = s; br = false; }
+      if (dFirst < bd && isLateralOk(tip, prev, c[0]!)) { bd = dFirst; best = s; br = true; }
     }
     if (!best) break;
     const nx = ori(best, br);
@@ -349,12 +385,12 @@ function chainLaneBidir(
     used.add(best.id);
   }
 
-  // 結合 + 近接点除去
+  // 結合 + 近接点除去 (ほぼ完全一致の重複のみ除去, S 精度を維持)
   function dedup(arr: Vec3[]): Vec3[] {
     if (arr.length === 0) return [];
     const out = [arr[0]!];
     for (let i = 1; i < arr.length; i++) {
-      if (dist2D(arr[i]!, out[out.length - 1]!) > 0.5) out.push(arr[i]!);
+      if (dist2D(arr[i]!, out[out.length - 1]!) > 0.01) out.push(arr[i]!);
     }
     return out;
   }
