@@ -34,21 +34,16 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 ### 2. `lane_boundary_tracker.ts`
 
 **入力トピック**:
-- `/t2/object_augmentor/augmented_scene` — レーン境界線データ
+- `/t2/object_augmentor/augmented_scene` — レーン境界線データ、ターゲットの同一フレーム位置
 - `/t2/bev_detection/objects` — ターゲット物体の世界座標検索
-- `/t2/lane_creator/output` — ego レーン全体の連続 `lane_center_curve`（v12〜）
 
 **出力トピック**: `/studio_script/lane_boundary_tracker`
 
 指定した世界座標のターゲット物体から、レーン境界線（白線）までの距離を、直交座標系および SL 座標系（Frenet フレーム）で算出します。
 
-SL 計算の `central_curve` は以下の優先順で自動選択:
+SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `predecessor_ids` を辿って**自車レーンのセグメントを ID ベースで自動結合**し、単一セグメントの長さ制限（≈86m）を超えて **100m 以上の距離**にも対応します。ID がないセグメントでは単一セグメントにフォールバックします。
 
-1. **`/t2/lane_creator/output` の `lane_center_curve`**（推奨、通常時）— ego レーン全体の連続 polyline（数百〜数千点、数 km 対応）
-2. **`successor_ids` / `predecessor_ids` による ID ベース結合**（Seek 直後のフォールバック）— 自車セグメントから lane graph を辿って結合
-3. **単一セグメントの `central_curve`**（最終フォールバック）— ID 情報もない場合（≈86m）
-
-`sl_central_curve_source` フィールドで現在どのソースが使われているか確認できます。
+`sl_central_curve_source` フィールドで現在のソースが確認できます（`"chained_id"` / `"single_segment"`）。
 
 **Variables パネルで設定する変数:**
 
@@ -90,8 +85,8 @@ SL 計算の `central_curve` は以下の優先順で自動選択:
 | フィールド | 説明 |
 |---|---|
 | `sl_valid` | SL 変換が成立した場合 true |
-| `sl_central_curve_source` | 使用中のソース: `"lane_creator"` / `"chained_id"` / `"single_segment"` |
-| `chained_segment_count` | ID ベース結合時に繋いだセグメント数（`lane_creator` 時は 0） |
+| `sl_central_curve_source` | 使用中のソース: `"chained_id"` / `"single_segment"` |
+| `chained_segment_count` | ID ベース結合時に繋いだセグメント数 |
 | `central_curve_total_length_m` | 使用中 `central_curve` 全体の弧長 [m] |
 | `central_curve_point_count` | 使用中 `central_curve` の頂点数 |
 | `ego_closest_curve_index` | S=0 とした `central_curve` 頂点のインデックス |
@@ -134,34 +129,9 @@ SL 座標系は、道路の中心線（`central_curve`）を基準にした**曲
 
 > この S 原点規約は社内 Python 版 `vehicle_coord_to_sl` と同一です。`target_s_m ≈ 50` ならターゲットは道路沿いに約 50m 先にいます。
 
-### ステップ 0: 長い `central_curve` の取得
+### ステップ 0: 複数セグメントの ID ベース結合
 
-`local_lane_segments` の各セグメントは `central_curve` が約 86m と限られています。100m 以上離れたターゲットの SL を計算するため、ego レーン全体をカバーする長い polyline を取得します。
-
-以下の 3 段構えで、状況に応じて最適なソースを選択します:
-
-#### (1) `/t2/lane_creator/output` の `lane_center_curve`（推奨・通常時）
-
-`/t2/lane_creator/output` の `lanes_info.lanes[i].lane_center_curve` は、`ego_lane_info.ego_lane_id` で示される **ego レーン全体**の連続した polyline です。**数百〜千点超**のサンプリングで数 km をカバーします。
-
-```typescript
-// bev_detection / augmented_scene とは別に lane_creator を購読
-// ego_lane_id を取得 → 該当 lane の lane_center_curve を保存
-if (event.topic === "/t2/lane_creator/output") {
-  const egoLaneId = msg.ego_lane_info?.ego_lane_id;
-  for (const lane of msg.lanes_info?.lanes ?? []) {
-    if (lane.lane_id === egoLaneId) {
-      storedLaneCenterCurve = lane.lane_center_curve;
-    }
-  }
-}
-```
-
-このソースは「セグメント結合」が不要で、レーン単位で提供されるため他車線混入のリスクがゼロです。
-
-#### (2) ID ベース結合（Seek 直後のフォールバック）
-
-`/t2/lane_creator/output` が未受信の間は、`augmented_scene.local_lane_segments` の各セグメントが持つ `successor_ids` / `predecessor_ids` を辿って結合します:
+`local_lane_segments` の各セグメントは `central_curve` が約 86m と限られています。100m 以上離れたターゲットの SL を計算するため、`successor_ids` / `predecessor_ids` を辿って**自車レーンのセグメントを自動結合**します。
 
 ```
 (後方)                 ego segment              (前方)
@@ -169,30 +139,23 @@ seg_C ← seg_B ← seg_A ← [ego (+x固定)] → seg_D → seg_E
    (predecessor_ids で辿る)        (successor_ids で辿る)
 ```
 
-**結合アルゴリズム（`chainLaneBidir`, v11〜）:**
+**結合アルゴリズム（`chainLaneBidir`）:**
 
 1. **ego segment の特定**: `central_curve` 上の点が車両原点 (0, 0) に最も近いセグメント
 2. **+x 方向に固定**: ego segment の curve を常に +x 方向（車両前方）に orient。逆方向の場合は curve を反転し、`left_boundary` と `right_boundary` を交換
-3. **前方結合**: `successor_ids`（curve 反転時は `predecessor_ids`）を辿って次のセグメントの id を取得し、その segment の curve を append
+3. **前方結合**: `successor_ids`（curve 反転時は `predecessor_ids`）を辿って次のセグメントの id を取得し、その segment の curve を append。最大 30 回繰り返し
 4. **後方結合**: `predecessor_ids`（curve 反転時は `successor_ids`）を辿って前のセグメントを prepend
 5. **ID がない場合は結合停止**: endpoint 近接による推測はせず、他車線を拾うリスクを排除
 6. **近接点除去**: 結合部で 0.01m 以内の重複点のみ除去（S 精度を維持）
+7. 結合された polyline を `central_curve` / `left_boundary` / `right_boundary` として SL 計算に使用
 
-> **v10 以前との違い**: 以前は endpoint が 10m 以内で近接するセグメントを結合していましたが、他車線のセグメントを拾うリスクがあったため、v11 で ID ベースに切り替えました。ID がないセグメントで結合は停止しますが、`lane_creator` がすぐに到着すれば自動的に (1) に切り替わります。
+`successor_ids` / `predecessor_ids` は lane graph の接続情報であるため、他車線のセグメントを拾うリスクはありません。
 
-#### (3) 単一セグメントの `central_curve`（最終フォールバック）
-
-`lane_creator` も `successor_ids` も利用不能な場合、ego segment の `central_curve` のみを使用（≈86m、≈40 点）。S 範囲は狭いものの距離計算自体は正しく行えます。
-
----
+**フォールバック**: `successor_ids` が存在しないセグメントでは結合が停止し、ego segment の `central_curve` のみを使用（≈86m、≈40 点）。S 範囲は狭いものの距離計算自体は正しく行えます。
 
 > **ポイント**: ego segment の向きは**ターゲット位置に依存しない**（常に +x 方向）ため、ターゲットが前方でも後方でも S の符号が一貫します。
 
-#### Seek / コマ送り時の挙動
-
-FoxBox の仕様上、Seek や時間ジャンプでモジュール変数がリセットされるため、`storedLaneCenterCurve` も一時的に空になります。この間は (2) または (3) にフォールバックします。次の `/t2/lane_creator/output` が到着すれば自動的に (1) に復帰します。
-
-コマ送り直後に `sl_central_curve_source` が一時的に `"chained_id"` になる場合がありますが、**距離計算の精度は実用上問題ないレベル**です（`lane_creator` との差は curve の点密度の違い程度）。
+> **補足**: `/t2/lane_creator/output` の `lane_center_curve` はレーン全体の高精度な polyline（1041 点）を提供しますが、3 番目の入力トピック追加による FoxBox の処理負荷が大きいため、v13 で採用を見送りました。コマ送り（Seek）時に状態がリセットされる制約もあり、ID ベース結合で実用上十分な精度が得られています。
 
 ### ステップ 1: S 値の計算（自車基準の累積弧長）
 
@@ -370,7 +333,7 @@ distance_target_edge_to_right_boundary_sl_m = target_l  −  right_boundary_l  �
 | **白線の指定** | `curve_point_index` で 1 点を手動選択 | ターゲットの S 位置で自動補間 |
 | **精度** | y 軸差分のみなので高速 | polyline 投影 + 外積で若干重い |
 | **推奨用途** | 特定の curve 頂点との距離を確認したい場合 | 停止車両 ↔ 白線の汎用的な距離計測 |
-| **central_curve のソース** | 単一セグメント | `lane_creator` > ID ベース結合 > 単一セグメント |
+| **central_curve のソース** | 単一セグメント | ID ベース結合（`successor_ids` / `predecessor_ids`）> 単一セグメント |
 | **S の原点** | ― | 自車最近傍点（S=0）。社内 Python 版と統一 |
 
 ### 座標フレームについて（v7〜）
@@ -426,8 +389,7 @@ Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_le
 
 ### SL 座標系
 
-- `central_curve` のソースは `sl_central_curve_source` で確認可能（`"lane_creator"` が最高品質）
-- Seek / 時間ジャンプ直後は `storedLaneCenterCurve` が一時的に空になり `"chained_id"` または `"single_segment"` にフォールバックしますが、次の `/t2/lane_creator/output` 受信で自動復帰します
+- `central_curve` のソースは `sl_central_curve_source` で確認可能（`"chained_id"` = ID ベース結合、`"single_segment"` = 単一セグメント）
 - ID ベース結合は `successor_ids` / `predecessor_ids` がないセグメントで停止します（他車線を拾うリスクを排除するため、endpoint 近接フォールバックは廃止）
 - SL 変換は 2D（x-y 平面）で計算しています。勾配のある道路では若干の誤差が生じます
 - 左/右白線の S 値が単調増加であることを前提に線形補間しています
