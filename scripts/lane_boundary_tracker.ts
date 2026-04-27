@@ -1,5 +1,5 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v12.2
+// Left boundary tracker + distance calculator  v13
 //
 // /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
 // 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
@@ -518,21 +518,16 @@ let storedTargetWidth    = 0;
 let storedTargetRawId    = -1;
 let storedTargetMatchDist = -1;
 
-// --- モジュール変数 (lane_creator から保存) ----------------------------------
-let storedLaneCenterCurve: Vec3[] = [];
-
 // ===========================================================================
 export const inputs = [
   "/t2/object_augmentor/augmented_scene",
   "/t2/bev_detection/objects",
-  "/t2/lane_creator/output",
 ];
 export const output = "/studio_script/lane_boundary_tracker";
 
 type InputEvent =
   | Input<"/t2/object_augmentor/augmented_scene">
-  | Input<"/t2/bev_detection/objects">
-  | Input<"/t2/lane_creator/output">;
+  | Input<"/t2/bev_detection/objects">;
 
 export default function script(
   event: InputEvent,
@@ -582,30 +577,6 @@ export default function script(
       if (bestD > thresholdM) storedTargetFound = false;
     }
 
-    return undefined;
-  }
-
-  // =========================================================================
-  // lane_creator/output 受信: ego lane の lane_center_curve を保存
-  // =========================================================================
-  if (event.topic === "/t2/lane_creator/output") {
-    const msg = event.message as unknown as {
-      ego_lane_info?: { ego_lane_id?: number };
-      lanes_info?: {
-        lanes?: { lane_id?: number; lane_center_curve?: Vec3[] }[];
-      };
-    };
-    storedLaneCenterCurve = [];
-    const egoLaneId = msg.ego_lane_info?.ego_lane_id;
-    const lanes = msg.lanes_info?.lanes;
-    if (typeof egoLaneId === "number" && Array.isArray(lanes)) {
-      for (const lane of lanes) {
-        if (lane.lane_id === egoLaneId && Array.isArray(lane.lane_center_curve)) {
-          storedLaneCenterCurve = lane.lane_center_curve.filter(isValidVec3).map(copyVec3);
-          break;
-        }
-      }
-    }
     return undefined;
   }
 
@@ -712,21 +683,16 @@ export default function script(
   // =========================================================================
   // SL 座標系 (Frenet) への変換 — S=0 は自車最近傍点
   // =========================================================================
-  // central_curve の選択 (優先順):
-  //   (1) lane_creator/output の lane_center_curve (レーン全体, 高精度)
-  //   (2) chainLaneBidir (ID ベースのみ, Seek 直後のフォールバック)
-  //   (3) 単一セグメントの central_curve (最終フォールバック)
-  const chained = storedLaneCenterCurve.length < 2 && storedTargetFound
+  // central_curve の選択:
+  //   (1) chainLaneBidir (successor_ids/predecessor_ids で ID ベース結合)
+  //   (2) 単一セグメントの central_curve (フォールバック)
+  const chained = storedTargetFound
     ? chainLaneBidir(segments)
     : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
-  const centralCurve: Vec3[] = storedLaneCenterCurve.length >= 2
-    ? storedLaneCenterCurve
-    : chained.central.length >= 2
-      ? chained.central
-      : (segmentFound ? foundSeg!.central_curve : []);
-  const curveSource = storedLaneCenterCurve.length >= 2 ? "lane_creator"
-    : chained.central.length >= 2 ? "chained_id" : "single_segment";
-  // 白線は引き続き augmented_scene から取得 (lane_creator には含まれない)
+  const centralCurve: Vec3[] = chained.central.length >= 2
+    ? chained.central
+    : (segmentFound ? foundSeg!.central_curve : []);
+  const curveSource = chained.central.length >= 2 ? "chained_id" : "single_segment";
   const slLeftCurve: Vec3[] = chained.left.length > 0 ? chained.left : leftCurve;
   const slRightCurve: Vec3[] = chained.right.length > 0 ? chained.right : rightCurve;
   const { cumS, egoClosestIdx } = cumulativeSFromEgo(centralCurve);
