@@ -227,6 +227,17 @@ function ptCurve(p: Vec3, c: Vec3[]): { dist: number; point: Vec3; index: number
   return { dist: bd, point: bp, index: bi };
 }
 
+function ptCurve2D(p: Vec3, c: Vec3[]): { dist: number; point: Vec3; index: number } {
+  if (c.length === 0) return { dist: -1, point: zeroVec3(), index: -1 };
+  if (c.length === 1) return { dist: dist2D(p, c[0]!), point: copyVec3(c[0]!), index: 0 };
+  let bd = Number.POSITIVE_INFINITY; let bp = zeroVec3(); let bi = 0;
+  for (let i = 0; i < c.length - 1; i++) {
+    const r = ptSegXYWithT(p, c[i]!, c[i + 1]!);
+    if (r.dist2D < bd) { bd = r.dist2D; bp = r.point; bi = i; }
+  }
+  return { dist: bd, point: bp, index: bi };
+}
+
 function minDist(p: Vec3, c: Vec3[]): number {
   if (c.length === 0) return Number.POSITIVE_INFINITY;
   return ptCurve(p, c).dist;
@@ -638,40 +649,38 @@ export default function script(
     }
   }
 
-  // 距離計算 (同一フレーム位置を使用)
+  // セグメント結合 (SL + Cartesian 共通)
+  const chained = storedTargetFound
+    ? chainLaneBidir(segments)
+    : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
+  const slLeftCurve: Vec3[] = chained.left.length > 0 ? chained.left : leftCurve;
+  const slRightCurve: Vec3[] = chained.right.length > 0 ? chained.right : rightCurve;
+
+  // 距離計算 (結合済み boundary + 2D 距離)
   const canCompute = segmentFound && storedTargetFound;
   let distLeft = -1; let nearestLeft = zeroVec3(); let nearestLeftIdx = -1;
   let distRight = -1; let nearestRight = zeroVec3();
 
   if (canCompute) {
-    if (leftCurve.length > 0) {
-      const rL = ptCurve(effectiveLocalPos, leftCurve);
+    if (slLeftCurve.length > 0) {
+      const rL = ptCurve2D(effectiveLocalPos, slLeftCurve);
       distLeft = rL.dist; nearestLeft = rL.point; nearestLeftIdx = rL.index;
     }
-    if (rightCurve.length > 0) {
-      const rR = ptCurve(effectiveLocalPos, rightCurve);
+    if (slRightCurve.length > 0) {
+      const rR = ptCurve2D(effectiveLocalPos, slRightCurve);
       distRight = rR.dist; nearestRight = rR.point;
     }
   }
   const distEdgeLeft = distLeft >= 0 ? distLeft - effectiveWidth * 0.5 : -1;
   const distEdgeRight = distRight >= 0 ? distRight - effectiveWidth * 0.5 : -1;
 
-  // 指定 curve point
   // =========================================================================
   // SL 座標系 (Frenet) への変換 — S=0 は自車最近傍点
   // =========================================================================
-  // central_curve の選択:
-  //   (1) chainLaneBidir (successor_ids/predecessor_ids で ID ベース結合)
-  //   (2) 単一セグメントの central_curve (フォールバック)
-  const chained = storedTargetFound
-    ? chainLaneBidir(segments)
-    : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
   const centralCurve: Vec3[] = chained.central.length >= 2
     ? chained.central
     : (segmentFound ? foundSeg!.central_curve : []);
   const curveSource = chained.central.length >= 2 ? "chained_id" : "single_segment";
-  const slLeftCurve: Vec3[] = chained.left.length > 0 ? chained.left : leftCurve;
-  const slRightCurve: Vec3[] = chained.right.length > 0 ? chained.right : rightCurve;
   const { cumS, egoClosestIdx } = cumulativeSFromEgo(centralCurve);
   // total length は先頭→末尾の絶対弧長 (S原点とは独立)
   const centralLen = cumS.length >= 2
