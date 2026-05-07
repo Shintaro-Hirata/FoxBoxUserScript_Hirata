@@ -87,12 +87,10 @@ type Stamp  = { sec: number; nsec: number };
 type Header = { seq: number; stamp: Stamp; frame_id: string };
 
 type GlobalVariables = {
-  lane_segment_id?: string;
   target_x?: number;
   target_y?: number;
   target_z?: number;
   threshold_m?: number;
-  curve_point_index?: number;
 };
 
 // --- 入力型 (union OK) ------------------------------------------------------
@@ -140,10 +138,8 @@ type SegmentSummary = {
 
 type Output = {
   header: Header;
-  lane_segment_id_input: string;
   target_world: Vec3;
   threshold_m: number;
-  select_mode: string;
   segment_found: boolean;
   segment_id: string;
   segment_is_target_lane: boolean;
@@ -165,11 +161,6 @@ type Output = {
   nearest_segment_index: number;
   distance_to_right_boundary_m: number;
   nearest_point_on_right_curve: Vec3;
-  selected_point_index: number;
-  selected_point_valid: boolean;
-  selected_point: Vec3;
-  distance_to_selected_point_m: number;
-  distance_target_edge_to_selected_y_m: number;
   available_segments: SegmentSummary[];
   available_segment_count: number;
   // ---- SL 座標系 ----
@@ -591,8 +582,6 @@ export default function script(
 
   const segments: InLaneSeg[] = msg.local_map_info?.local_lane_segments ?? [];
 
-  const segIdInput =
-    typeof globalVars.lane_segment_id === "string" ? globalVars.lane_segment_id : "";
   const hasTarget =
     typeof globalVars.target_x === "number" &&
     typeof globalVars.target_y === "number" &&
@@ -602,9 +591,6 @@ export default function script(
     : zeroVec3();
   const thresholdM =
     typeof globalVars.threshold_m === "number" ? globalVars.threshold_m : 1.0;
-  const wantIdx =
-    typeof globalVars.curve_point_index === "number"
-      ? Math.floor(globalVars.curve_point_index) : -1;
 
   // available_segments
   const availableSegments: SegmentSummary[] = [];
@@ -615,23 +601,17 @@ export default function script(
   }
 
   // セグメント選択
+  // セグメント選択 (Cartesian 用): ターゲットに最も近い central_curve を持つセグメント
   let foundSeg: InLaneSeg | undefined;
-  let selectMode = "none";
-
-  if (segIdInput.length > 0) {
-    foundSeg = segments.find((s) => s.id === segIdInput);
-    selectMode = "manual";
-  } else if (storedTargetFound) {
+  if (storedTargetFound) {
     let bestDist = Number.POSITIVE_INFINITY;
     for (const s of segments) {
       if (s.central_curve.length === 0) continue;
       const d = minDist(storedTargetLocalPos, s.central_curve);
       if (d < bestDist) { bestDist = d; foundSeg = s; }
     }
-    selectMode = "nearest_to_target";
   } else {
     foundSeg = segments.find((s) => s.is_target_lane);
-    selectMode = "is_target_lane";
   }
 
   const segmentFound = foundSeg != null;
@@ -673,13 +653,6 @@ export default function script(
   }
 
   // 指定 curve point
-  const idxValid = wantIdx >= 0 && wantIdx < leftCurve.length;
-  const selPoint = idxValid ? copyVec3(leftCurve[wantIdx]!) : zeroVec3();
-  const distToSel = (idxValid && storedTargetFound) ? dist3(effectiveLocalPos, selPoint) : -1;
-  const distEdgeToSelY = (idxValid && storedTargetFound)
-    ? effectiveLocalPos.y - selPoint.y - (effectiveWidth * 0.5)
-    : 0;
-
   // =========================================================================
   // SL 座標系 (Frenet) への変換 — S=0 は自車最近傍点
   // =========================================================================
@@ -755,10 +728,8 @@ export default function script(
 
   return {
     header: msg.header,
-    lane_segment_id_input: segIdInput,
     target_world: targetWorld,
     threshold_m: thresholdM,
-    select_mode: selectMode,
     segment_found: segmentFound,
     segment_id: foundSeg ? foundSeg.id : "",
     segment_is_target_lane: segmentFound ? foundSeg!.is_target_lane : false,
@@ -780,11 +751,6 @@ export default function script(
     nearest_segment_index: nearestLeftIdx,
     distance_to_right_boundary_m: distRight,
     nearest_point_on_right_curve: nearestRight,
-    selected_point_index: wantIdx,
-    selected_point_valid: idxValid,
-    selected_point: selPoint,
-    distance_to_selected_point_m: distToSel,
-    distance_target_edge_to_selected_y_m: distEdgeToSelY,
     available_segments: availableSegments,
     available_segment_count: segments.length,
     sl_valid: slValid,
