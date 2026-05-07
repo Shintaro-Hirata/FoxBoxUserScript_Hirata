@@ -53,13 +53,10 @@ SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `
 | `target_y` | number | 同 y |
 | `target_z` | number | 同 z |
 | `threshold_m` | number | マッチング閾値 [m]（省略時 1.0m） |
-| `lane_segment_id` | string | 追跡するレーンセグメントの id（省略時は自動選択、直交座標系のみ） |
-| `curve_point_index` | number | `left_boundary.curve` の配列インデックス（省略可、直交座標系のみ） |
 
 **セグメント自動選択ロジック（直交座標系の距離計算用）:**
-1. `lane_segment_id` が設定されていれば id で完全一致検索
-2. 未設定 & ターゲット取得済み → `central_curve` への最短距離で自動選択
-3. 未設定 & ターゲットなし → `is_target_lane=true` を fallback
+1. ターゲット取得済み → `central_curve` への最短距離で自動選択
+2. ターゲットなし → `is_target_lane=true` を fallback
 
 ---
 
@@ -67,20 +64,18 @@ SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `
 
 ### 直交座標系（Cartesian）
 
-単一セグメントの curve を使用。`lane_segment_id` / `curve_point_index` で手動指定可能。
+自動選択された単一セグメントの curve を使用。参考値として残しています。
 
 | フィールド | 説明 |
 |---|---|
 | `distance_to_left_boundary_m` | ターゲット ↔ 左境界 curve 全体の最短距離 [m] |
 | `distance_to_right_boundary_m` | ターゲット ↔ 右境界 curve 全体の最短距離 [m] |
-| `distance_target_edge_to_selected_y_m` | `target.local_y − selected.y − width/2`（y 軸方向の端-点距離） |
-| `selected_point` | `curve_point_index` で指定した curve 上の点の座標 |
 | `nearest_point_on_left_curve` | left_boundary polyline 上の最短点（頂点間の補間点） |
 | `available_segments` | 全 segment の id と距離一覧（id 確認・選択用） |
 
 ### SL 座標系（Frenet フレーム）
 
-`lane_creator` のレーン中心線 or 複数セグメント結合による長い polyline を使用。100m+ の距離に対応。
+`successor_ids` / `predecessor_ids` による ID ベース結合で長い polyline を構築。100m+ の距離に対応。
 
 | フィールド | 説明 |
 |---|---|
@@ -323,7 +318,7 @@ distance_target_to_right_boundary_sl_m      = target_l  −  right_boundary_l
 distance_target_edge_to_right_boundary_sl_m = target_l  −  right_boundary_l  −  width / 2
 ```
 
-> この式は直交座標系の `distance_target_edge_to_selected_y_m`（= `target.y − boundary.y − width/2`）と同じ構造です。L 軸は y 軸と完全には一致しないため若干の差異がありますが、平坦で直線的な道路では非常に近い値になります。
+> この式は直交座標系の `target.y − boundary.y − width/2` と同じ構造です。L 軸は y 軸と完全には一致しないため若干の差異がありますが、平坦で直線的な道路では非常に近い値になります。
 
 ### 直交座標系との比較
 
@@ -331,10 +326,9 @@ distance_target_edge_to_right_boundary_sl_m = target_l  −  right_boundary_l  �
 |---|---|---|
 | **基準** | 車両フレームの y 軸 | `central_curve` への垂線 |
 | **道路形状への対応** | 曲がった道路では距離の意味が変わる | 道路に沿った距離なので直感的 |
-| **代表フィールド** | `distance_target_edge_to_selected_y_m` | `distance_target_edge_to_left_boundary_sl_m` |
-| **白線の指定** | `curve_point_index` で 1 点を手動選択 | ターゲットの S 位置で自動補間 |
-| **精度** | y 軸差分のみなので高速 | polyline 投影 + 外積で若干重い |
-| **推奨用途** | 特定の curve 頂点との距離を確認したい場合 | 停止車両 ↔ 白線の汎用的な距離計測 |
+| **代表フィールド** | `distance_to_left_boundary_m` | `distance_target_edge_to_left_boundary_sl_m` |
+| **精度** | 単一セグメント内の最短距離 | polyline 投影 + 外積（道路に沿った距離） |
+| **推奨用途** | 参考値 | **停止車両 ↔ 白線の汎用的な距離計測** |
 | **central_curve のソース** | 単一セグメント | ID ベース結合（`successor_ids` / `predecessor_ids`）> 単一セグメント |
 | **S の原点** | ― | 自車最近傍点（S=0）。社内 Python 版と統一 |
 
@@ -355,9 +349,9 @@ lane_boundary_tracker.distance_target_edge_to_right_boundary_sl_m
 lane_boundary_tracker.target_s_m
 lane_boundary_tracker.target_l_m
 
-# 直交座標系（特定 curve 頂点との距離確認用）
+# 直交座標系（参考値）
 lane_boundary_tracker.distance_to_left_boundary_m
-lane_boundary_tracker.distance_target_edge_to_selected_y_m
+lane_boundary_tracker.distance_to_right_boundary_m
 
 # 状態フラグ・デバッグ
 lane_boundary_tracker.target_object_found
