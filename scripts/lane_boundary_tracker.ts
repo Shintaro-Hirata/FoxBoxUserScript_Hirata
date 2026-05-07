@@ -157,9 +157,11 @@ type Output = {
   target_effective_width: number;
   distance_computed: boolean;
   distance_to_left_boundary_m: number;
+  distance_target_edge_to_left_boundary_m: number;
   nearest_point_on_left_curve: Vec3;
   nearest_segment_index: number;
   distance_to_right_boundary_m: number;
+  distance_target_edge_to_right_boundary_m: number;
   nearest_point_on_right_curve: Vec3;
   available_segments: SegmentSummary[];
   available_segment_count: number;
@@ -651,6 +653,8 @@ export default function script(
       distRight = rR.dist; nearestRight = rR.point;
     }
   }
+  const distEdgeLeft = distLeft >= 0 ? distLeft - effectiveWidth * 0.5 : -1;
+  const distEdgeRight = distRight >= 0 ? distRight - effectiveWidth * 0.5 : -1;
 
   // 指定 curve point
   // =========================================================================
@@ -747,9 +751,11 @@ export default function script(
     target_effective_width: effectiveWidth,
     distance_computed: canCompute,
     distance_to_left_boundary_m: distLeft,
+    distance_target_edge_to_left_boundary_m: distEdgeLeft,
     nearest_point_on_left_curve: nearestLeft,
     nearest_segment_index: nearestLeftIdx,
     distance_to_right_boundary_m: distRight,
+    distance_target_edge_to_right_boundary_m: distEdgeRight,
     nearest_point_on_right_curve: nearestRight,
     available_segments: availableSegments,
     available_segment_count: segments.length,
