@@ -658,8 +658,8 @@ export default function script(
 
   // 距離計算 (結合済み boundary + 2D 距離)
   const canCompute = segmentFound && storedTargetFound;
-  let distLeft = -1; let nearestLeft = zeroVec3(); let nearestLeftIdx = -1;
-  let distRight = -1; let nearestRight = zeroVec3();
+  let distLeft = 0; let nearestLeft = zeroVec3(); let nearestLeftIdx = -1;
+  let distRight = 0; let nearestRight = zeroVec3();
 
   if (canCompute) {
     if (slLeftCurve.length > 0) {
@@ -671,8 +671,8 @@ export default function script(
       distRight = rR.dist; nearestRight = rR.point;
     }
   }
-  const distEdgeLeft = distLeft >= 0 ? distLeft - effectiveWidth * 0.5 : -1;
-  const distEdgeRight = distRight >= 0 ? distRight - effectiveWidth * 0.5 : -1;
+  const distEdgeLeft = canCompute ? distLeft - effectiveWidth * 0.5 : 0;
+  const distEdgeRight = canCompute ? distRight - effectiveWidth * 0.5 : 0;
 
   // =========================================================================
   // SL 座標系 (Frenet) への変換 — S=0 は自車最近傍点
