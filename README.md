@@ -127,7 +127,9 @@ SL 座標系は、道路の中心線（`central_curve`）を基準にした**曲
 - **S (Station / Longitudinal)**: 自車（車両フレーム原点）に最も近い `central_curve` 頂点を **S=0** とし、polyline に沿って測った**符号付き弧長** [m]。正=前方、負=後方。
 - **L (Lateral)**: ターゲットの **central_curve 上の投影点**からターゲットまの**符号付き垂直距離** [m]
 
-> この S 原点規約は社内 Python 版 `vehicle_coord_to_sl` と同一です。`target_s_m ≈ 50` ならターゲットは道路沿いに約 50m 先にいます。
+> この S 原点規約は社内 Python 版 [rt3000/bev/sl_convert.py](https://github.com/t2-auto/perception-utilities/blob/main/rt3000/bev/sl_convert.py) と同一です。https://t2-auto.slack.com/archives/C043EM71GJW/p1776863535569949
+>
+> `target_s_m ≈ 50` ならターゲットは道路沿いに約 50m 先にいます。
 
 ### ステップ 0: 複数セグメントの ID ベース結合
 
