@@ -531,6 +531,12 @@ let storedTargetWidth    = 0;
 let storedTargetRawId    = -1;
 let storedTargetMatchDist = -1;
 
+// --- モジュール変数 (augmented_scene から保存) --------------------------------
+let storedSceneHeader: Header = { seq: 0, stamp: { sec: 0, nsec: 0 }, frame_id: "" };
+let storedSceneSegments: InLaneSeg[] = [];
+let storedSceneAugObjects: InAugObj[] = [];
+let storedSceneReceived = false;
+
 // ===========================================================================
 export const inputs = [
   "/t2/object_augmentor/augmented_scene",
@@ -589,20 +595,32 @@ export default function script(
       storedTargetMatchDist = bestD === Number.POSITIVE_INFINITY ? -1 : bestD;
       if (bestD > thresholdM) storedTargetFound = false;
     }
-
-    return undefined;
+    // return undefined せず、下の出力計算に落ちる
+    // (storedSceneReceived が true なら stored scene データで出力)
   }
 
   // =========================================================================
-  // augmented_scene 受信: 保存した local_position で距離計算
+  // augmented_scene 受信: シーンデータを保存
   // =========================================================================
-  const msg = event.message as unknown as {
-    header: Header;
-    augmented_objects: InAugObj[];
-    local_map_info: { local_lane_segments: InLaneSeg[] };
-  };
+  if (event.topic === "/t2/object_augmentor/augmented_scene") {
+    const msg = event.message as unknown as {
+      header: Header;
+      augmented_objects: InAugObj[];
+      local_map_info: { local_lane_segments: InLaneSeg[] };
+    };
+    storedSceneHeader = msg.header;
+    storedSceneSegments = msg.local_map_info?.local_lane_segments ?? [];
+    storedSceneAugObjects = msg.augmented_objects ?? [];
+    storedSceneReceived = true;
+  }
 
-  const segments: InLaneSeg[] = msg.local_map_info?.local_lane_segments ?? [];
+  // =========================================================================
+  // 出力計算: bev_detection / augmented_scene どちらの到着でも実行
+  // (Seek 後にどちらが先に来ても正しく動作する)
+  // =========================================================================
+  if (!storedSceneReceived) return undefined;
+
+  const segments = storedSceneSegments;
 
   const hasTarget =
     typeof globalVars.target_x === "number" &&
@@ -647,8 +665,7 @@ export default function script(
   let sameFrameMatch = false;
 
   if (storedTargetFound && storedTargetRawId >= 0) {
-    const augObjs: InAugObj[] = msg.augmented_objects ?? [];
-    for (const ao of augObjs) {
+    for (const ao of storedSceneAugObjects) {
       if (ao.bbox_info.id === storedTargetRawId && isValidVec3(ao.bbox_info.local_position)) {
         effectiveLocalPos = copyVec3(ao.bbox_info.local_position as Vec3);
         if (typeof ao.bbox_info.width === "number") effectiveWidth = ao.bbox_info.width;
@@ -754,7 +771,7 @@ export default function script(
   }
 
   return {
-    header: msg.header,
+    header: storedSceneHeader,
     target_world: targetWorld,
     threshold_m: thresholdM,
     segment_found: segmentFound,
