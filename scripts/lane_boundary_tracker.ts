@@ -173,6 +173,7 @@ type Output = {
   central_curve_point_count: number;
   ego_closest_curve_index: number;
   target_s_m: number;
+  target_s_chord_m: number;
   target_l_m: number;
   target_central_projection: Vec3;
   target_central_segment_index: number;
@@ -696,7 +697,7 @@ export default function script(
     : 0;
 
   let slValid = false;
-  let targetS = 0; let targetL = 0;
+  let targetS = 0; let targetChord = 0; let targetL = 0;
   let targetCentralProj = zeroVec3();
   let targetCentralIdx = -1;
   let leftLAtS = 0; let leftBracket = "none";
@@ -711,6 +712,10 @@ export default function script(
       targetS = tSL.s; targetL = tSL.l;
       targetCentralProj = tSL.projection;
       targetCentralIdx = tSL.segmentIndex;
+
+      // chord distance: ego 投影点 〜 target 投影点の直線距離 (検証用)
+      const egoProj = pointToSL(zeroVec3(), centralCurve, cumS);
+      targetChord = egoProj.valid ? dist2D(egoProj.projection, tSL.projection) : 0;
 
       // 左境界線の各点を central_curve に投影して (s, l) 配列を作る (結合済み curve 使用)
       if (slLeftCurve.length > 0) {
@@ -783,6 +788,7 @@ export default function script(
     central_curve_point_count: centralCurve.length,
     ego_closest_curve_index: egoClosestIdx,
     target_s_m: targetS,
+    target_s_chord_m: targetChord,
     target_l_m: targetL,
     target_central_projection: targetCentralProj,
     target_central_segment_index: targetCentralIdx,
