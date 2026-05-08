@@ -715,7 +715,8 @@ export default function script(
 
       // chord distance: ego 投影点 〜 target 投影点の直線距離 (検証用)
       const egoProj = pointToSL(zeroVec3(), centralCurve, cumS);
-      targetChord = egoProj.valid ? dist2D(egoProj.projection, tSL.projection) : 0;
+      const chordDist = egoProj.valid ? dist2D(egoProj.projection, tSL.projection) : 0;
+      targetChord = targetS >= 0 ? chordDist : -chordDist;
 
       // 左境界線の各点を central_curve に投影して (s, l) 配列を作る (結合済み curve 使用)
       if (slLeftCurve.length > 0) {
