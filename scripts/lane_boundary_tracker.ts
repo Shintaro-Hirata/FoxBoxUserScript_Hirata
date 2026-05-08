@@ -261,8 +261,8 @@ function ptSegXYWithT(p: Vec3, a: Vec3, b: Vec3): {
   return { t, point: proj, dist2D: Math.sqrt(dx * dx + dy * dy) };
 }
 
-// central_curve 上の各頂点までの累積弧長 (2D) を、自車原点 (0,0) に最も近い頂点を
-// S=0 として返す。S=0 より前方 (curve 方向) は正、後方は負。
+// central_curve 上の自車原点 (0,0) に最も近い「polyline 上の点」を S=0 とした
+// 累積弧長を返す。頂点間の補間点も考慮するため、S=0 の位置が正確。
 // 社内 Python 版 vehicle_coord_to_sl と同一の S 原点規約。
 function cumulativeSFromEgo(c: Vec3[]): { cumS: number[]; egoClosestIdx: number } {
   if (c.length === 0) return { cumS: [], egoClosestIdx: -1 };
@@ -275,22 +275,30 @@ function cumulativeSFromEgo(c: Vec3[]): { cumS: number[]; egoClosestIdx: number 
     raw.push(raw[i - 1]! + Math.sqrt(dx * dx + dy * dy));
   }
 
-  // 自車原点 (0,0) に最も近い頂点を探索
-  let egoIdx = 0;
-  let egoMinD = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < c.length; i++) {
-    const d = c[i]!.x * c[i]!.x + c[i]!.y * c[i]!.y;
-    if (d < egoMinD) { egoMinD = d; egoIdx = i; }
+  // 自車原点 (0,0) に最も近い polyline 上の点を探索 (頂点間の補間点も含む)
+  const origin = zeroVec3();
+  let bestD = Number.POSITIVE_INFINITY;
+  let bestS = 0;
+  let bestIdx = 0;
+
+  for (let i = 0; i < c.length - 1; i++) {
+    const r = ptSegXYWithT(origin, c[i]!, c[i + 1]!);
+    if (r.dist2D < bestD) {
+      bestD = r.dist2D;
+      const segDx = c[i + 1]!.x - c[i]!.x;
+      const segDy = c[i + 1]!.y - c[i]!.y;
+      bestS = raw[i]! + r.t * Math.sqrt(segDx * segDx + segDy * segDy);
+      bestIdx = i;
+    }
   }
 
-  // オフセットして S=0 を自車最近傍点に設定
-  const offset = raw[egoIdx]!;
+  // オフセットして S=0 を自車最近傍投影点に設定
   const cumS: number[] = [];
   for (let i = 0; i < raw.length; i++) {
-    cumS.push(raw[i]! - offset);
+    cumS.push(raw[i]! - bestS);
   }
 
-  return { cumS, egoClosestIdx: egoIdx };
+  return { cumS, egoClosestIdx: bestIdx };
 }
 
 // --- セグメント結合 (双方向) ------------------------------------------------
