@@ -19,6 +19,7 @@ type GlobalVariables = {
 
 type InProcessInfo = {
   name?: string;
+  process_name?: string;
   pid?: number;
   resident_memory?: number;
   virtual_memory?: number;
@@ -75,7 +76,8 @@ export default function script(
     const mb = bytes / BYTES_TO_MB;
     if (mb >= thresholdMB) {
       filtered.push({
-        name: typeof p.name === "string" ? p.name : "",
+        name: typeof p.process_name === "string" ? p.process_name
+            : typeof p.name === "string" ? p.name : "",
         pid: typeof p.pid === "number" ? p.pid : 0,
         resident_memory_mb: Math.round(mb * 100) / 100,
       });
