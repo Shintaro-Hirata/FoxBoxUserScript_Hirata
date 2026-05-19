@@ -579,12 +579,14 @@ export default function script(
   const leftCurve: Vec3[] = segmentFound ? foundSeg!.left_boundary.curve : [];
   const rightCurve: Vec3[] = segmentFound ? foundSeg!.right_boundary.curve : [];
 
-  // セグメント結合 (SL + Cartesian 共通)
+  // セグメント結合 (SL central_curve 用: ego レーンを結合)
   const chained = targetFound
     ? chainLaneBidir(segments)
     : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
-  const slLeftCurve: Vec3[] = chained.left.length > 0 ? chained.left : leftCurve;
-  const slRightCurve: Vec3[] = chained.right.length > 0 ? chained.right : rightCurve;
+  // 白線は foundSeg (ターゲット最近傍セグメント) の境界を使用
+  // ターゲットが ego レーンと別レーンにいる場合でも正しい白線で距離計算される
+  const slLeftCurve: Vec3[] = leftCurve;
+  const slRightCurve: Vec3[] = rightCurve;
 
   // 距離計算 (結合済み boundary + 2D 距離)
   const canCompute = segmentFound && targetFound;
