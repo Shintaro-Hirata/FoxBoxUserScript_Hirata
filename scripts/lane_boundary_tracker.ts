@@ -466,10 +466,15 @@ function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
   return { valid: true, l: lArr[last]!, bracketMode: "fallback" };
 }
 
-// --- モジュール変数 (bev_detection から width を取得) -------------------------
-// augmented_scene の bbox_info.width が全物体 2.5 に固定されるバグがあるため、
-// bev_detection から正しい width を取得して id → width のマップに保存する。
-const storedWidthById = new Map<number, number>();
+// --- モジュール変数 -----------------------------------------------------------
+// augmented_scene の track_id でターゲットを特定し、その local_position を参照座標として
+// bev_detection から最近傍物体を探す。bev_detection のデータ (local_position, width 等)
+// は augmented_scene より正確 (width=2.5 バグ回避 + 検出精度)。
+let storedRefLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
+let storedRefFound = false;
+let storedBevLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
+let storedBevWidth = 0;
+let storedBevFound = false;
 
 // ===========================================================================
 export const inputs = [
@@ -488,15 +493,25 @@ export default function script(
 ): Output | undefined {
 
   // =========================================================================
-  // bev_detection 受信: 各物体の正しい width を id → width マップに保存
+  // bev_detection 受信: 参照座標に最も近い物体の local_position / width を保存
   // =========================================================================
   if (event.topic === "/t2/bev_detection/objects") {
-    const msg = event.message as unknown as {
-      detected_objects: { id?: number; width?: number }[];
-    };
-    for (const o of msg.detected_objects ?? []) {
-      if (typeof o.id === "number" && typeof o.width === "number") {
-        storedWidthById.set(o.id, o.width);
+    if (storedRefFound) {
+      const bmsg = event.message as unknown as {
+        detected_objects: {
+          id?: number; local_position?: Vec3; width?: number;
+        }[];
+      };
+      let bestD = Number.POSITIVE_INFINITY;
+      for (const o of bmsg.detected_objects ?? []) {
+        if (!isValidVec3(o.local_position)) continue;
+        const d = dist2D(o.local_position as Vec3, storedRefLocalPos);
+        if (d < bestD) {
+          bestD = d;
+          storedBevLocalPos = copyVec3(o.local_position as Vec3);
+          storedBevWidth = typeof o.width === "number" ? o.width : 0;
+          storedBevFound = true;
+        }
       }
     }
     return undefined;
@@ -529,11 +544,12 @@ export default function script(
         : typeof bi.id === "number" ? bi.id : -1;
       if (tid !== wantTrackId) continue;
       if (!isValidVec3(bi.local_position)) continue;
-      effectiveLocalPos = copyVec3(bi.local_position as Vec3);
-      // width: bev_detection の正しい値を優先、なければ augmented_scene の値
-      const bboxId = typeof bi.id === "number" ? bi.id : -1;
-      const bevWidth = bboxId >= 0 ? storedWidthById.get(bboxId) : undefined;
-      effectiveWidth = bevWidth != null ? bevWidth
+      // 参照座標を保存 (bev_detection でのマッチング用)
+      storedRefLocalPos = copyVec3(bi.local_position as Vec3);
+      storedRefFound = true;
+      // bev_detection の local_position / width を優先、なければ augmented_scene を使用
+      effectiveLocalPos = storedBevFound ? copyVec3(storedBevLocalPos) : copyVec3(bi.local_position as Vec3);
+      effectiveWidth = storedBevFound ? storedBevWidth
         : typeof bi.width === "number" ? bi.width : 0;
       targetTrackId = tid;
       targetFound = true;

@@ -105,8 +105,12 @@ function getTrackId(ao: InAugObj): number {
   return -1;
 }
 
-// augmented_scene の width が全物体 2.5 に固定されるバグ回避用
-const storedWidthById = new Map<number, number>();
+// augmented_scene の track_id で特定 → bev_detection から local_position 最近傍で
+// 正しい width 等を取得する。
+let storedRefLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
+let storedRefFound = false;
+let storedBevWidth = 0;
+let storedBevFound = false;
 
 export const inputs = [
   "/t2/object_augmentor/augmented_scene",
@@ -124,12 +128,21 @@ export default function script(
 ): Output | undefined {
 
   if (event.topic === "/t2/bev_detection/objects") {
-    const bmsg = event.message as unknown as {
-      detected_objects: { id?: number; width?: number }[];
-    };
-    for (const o of bmsg.detected_objects ?? []) {
-      if (typeof o.id === "number" && typeof o.width === "number") {
-        storedWidthById.set(o.id, o.width);
+    if (storedRefFound) {
+      const bmsg = event.message as unknown as {
+        detected_objects: { id?: number; local_position?: Vec3; width?: number }[];
+      };
+      let bestD = Number.POSITIVE_INFINITY;
+      for (const o of bmsg.detected_objects ?? []) {
+        if (!isValidVec3(o.local_position)) continue;
+        const dx = (o.local_position as Vec3).x - storedRefLocalPos.x;
+        const dy = (o.local_position as Vec3).y - storedRefLocalPos.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < bestD) {
+          bestD = d;
+          storedBevWidth = typeof o.width === "number" ? o.width : 0;
+          storedBevFound = true;
+        }
       }
     }
     return undefined;
@@ -172,6 +185,12 @@ export default function script(
     // velocity フィルタ (設定時のみ): norm が閾値以下のみマッチ
     if (velMaxMps >= 0 && velNorm > velMaxMps) continue;
 
+    // 参照座標を保存 (bev_detection マッチング用)
+    if (hasLocal) {
+      storedRefLocalPos = copyVec3(bi.local_position as Vec3);
+      storedRefFound = true;
+    }
+
     matched = {
       track_id: tid,
       bbox_id: typeof bi.id === "number" ? bi.id : -1,
@@ -179,8 +198,7 @@ export default function script(
       local_position_valid: hasLocal,
       local_theta: typeof bi.local_theta === "number" ? bi.local_theta : 0,
       length:     typeof bi.length     === "number" ? bi.length     : 0,
-      width:      (typeof bi.id === "number" && storedWidthById.has(bi.id))
-                    ? storedWidthById.get(bi.id)!
+      width:      storedBevFound ? storedBevWidth
                     : typeof bi.width === "number" ? bi.width : 0,
       height:     typeof bi.height     === "number" ? bi.height     : 0,
       type:       objType,
