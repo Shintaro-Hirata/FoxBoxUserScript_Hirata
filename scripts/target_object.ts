@@ -24,6 +24,7 @@ type GlobalVariables = {
   track_id?: number | string;
   target_type?: number | string;
   target_sub_type?: number | string;
+  velocity_max_mps?: number | string;
 };
 
 type Vec3   = { x: number; y: number; z: number };
@@ -64,12 +65,14 @@ type MatchedObject = {
   sub_type: number;
   confidence: number;
   velocity: Vec3;
+  velocity_norm: number;
   velocity_valid: boolean;
 };
 
 type Output = {
   header: Header;
   track_id_input: number;
+  velocity_max_mps_input: number;
   match_found: boolean;
   augmented_object_count: number;
   matched_index: number;
@@ -91,7 +94,7 @@ function emptyMatched(): MatchedObject {
     local_position: zeroVec3(), local_position_valid: false,
     local_theta: 0, length: 0, width: 0, height: 0,
     type: 0, sub_type: 0, confidence: 0,
-    velocity: zeroVec3(), velocity_valid: false,
+    velocity: zeroVec3(), velocity_norm: 0, velocity_valid: false,
   };
 }
 
@@ -118,6 +121,7 @@ export default function script(
   const wantTrackId = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
   const wantType    = globalVars.target_type != null ? Number(globalVars.target_type) : -1;
   const wantSubType = globalVars.target_sub_type != null ? Number(globalVars.target_sub_type) : -1;
+  const velMaxMps   = globalVars.velocity_max_mps != null ? Number(globalVars.velocity_max_mps) : -1;
 
   let matchFound = false;
   let matchedIdx = -1;
@@ -139,6 +143,11 @@ export default function script(
 
     const hasLocal = isValidVec3(bi.local_position);
     const hasVel = ao.tracking_info != null && isValidVec3(ao.tracking_info.velocity);
+    const vel = hasVel ? ao.tracking_info!.velocity as Vec3 : zeroVec3();
+    const velNorm = hasVel ? Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z) : 0;
+
+    // velocity フィルタ (設定時のみ): norm が閾値以下のみマッチ
+    if (velMaxMps >= 0 && velNorm > velMaxMps) continue;
 
     matched = {
       track_id: tid,
@@ -152,7 +161,8 @@ export default function script(
       type:       objType,
       sub_type:   objSubType,
       confidence: typeof bi.confidence === "number" ? bi.confidence : 0,
-      velocity: hasVel ? copyVec3(ao.tracking_info!.velocity as Vec3) : zeroVec3(),
+      velocity: hasVel ? copyVec3(vel) : zeroVec3(),
+      velocity_norm: velNorm,
       velocity_valid: hasVel,
     };
     matchFound = true;
@@ -163,6 +173,7 @@ export default function script(
   return {
     header: msg.header,
     track_id_input: wantTrackId,
+    velocity_max_mps_input: velMaxMps,
     match_found: matchFound,
     augmented_object_count: augObjects.length,
     matched_index: matchedIdx,

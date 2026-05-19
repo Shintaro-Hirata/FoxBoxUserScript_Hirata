@@ -87,20 +87,10 @@ type Stamp  = { sec: number; nsec: number };
 type Header = { seq: number; stamp: Stamp; frame_id: string };
 
 type GlobalVariables = {
-  target_x?: number;
-  target_y?: number;
-  target_z?: number;
-  threshold_m?: number;
+  track_id?: number | string;
 };
 
 // --- 入力型 (union OK) ------------------------------------------------------
-type InDetObj = {
-  id?: number;
-  position?: Vec3;
-  local_position?: Vec3;
-  width?: number;
-};
-
 type InBBoxInfo = {
   id?: number;
   local_position?: Vec3;
@@ -115,7 +105,8 @@ type InBBoxInfo = {
 
 type InAugObj = {
   bbox_info: InBBoxInfo;
-  tracking_info?: { velocity?: Vec3 };
+  tracking_info?: { velocity?: Vec3; track_id?: number };
+  track_id?: number;
 };
 
 type InLaneSeg = {
@@ -138,8 +129,7 @@ type SegmentSummary = {
 
 type Output = {
   header: Header;
-  target_world: Vec3;
-  threshold_m: number;
+  track_id_input: number;
   segment_found: boolean;
   segment_id: string;
   segment_is_target_lane: boolean;
@@ -147,14 +137,10 @@ type Output = {
   left_boundary_point_count: number;
   right_boundary_curve: Vec3[];
   right_boundary_point_count: number;
-  target_object_found: boolean;
-  target_object_raw_id: number;
-  target_object_local_position: Vec3;
-  target_object_width: number;
-  target_object_world_match_dist_m: number;
-  target_same_frame_match: boolean;
-  target_effective_local_position: Vec3;
-  target_effective_width: number;
+  target_found: boolean;
+  target_track_id: number;
+  target_local_position: Vec3;
+  target_width: number;
   distance_computed: boolean;
   distance_to_left_boundary_m: number;
   distance_target_edge_to_left_boundary_m: number;
@@ -524,130 +510,65 @@ function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
   return { valid: true, l: lArr[last]!, bracketMode: "fallback" };
 }
 
-// --- モジュール変数 (bev_detection から保存) --------------------------------
-let storedTargetFound    = false;
-let storedTargetLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
-let storedTargetWidth    = 0;
-let storedTargetRawId    = -1;
-let storedTargetMatchDist = -1;
-
-// --- モジュール変数 (augmented_scene から保存) --------------------------------
-let storedSceneHeader: Header = { seq: 0, stamp: { sec: 0, nsec: 0 }, frame_id: "" };
-let storedSceneSegments: InLaneSeg[] = [];
-let storedSceneAugObjects: InAugObj[] = [];
-let storedSceneReceived = false;
-
 // ===========================================================================
-export const inputs = [
-  "/t2/object_augmentor/augmented_scene",
-  "/t2/bev_detection/objects",
-];
+export const inputs = ["/t2/object_augmentor/augmented_scene"];
 export const output = "/studio_script/lane_boundary_tracker";
 
-type InputEvent =
-  | Input<"/t2/object_augmentor/augmented_scene">
-  | Input<"/t2/bev_detection/objects">;
+// track_id → augmented_objects から直接検索するため、bev_detection 不要。
+// 単一トピックなので Seek 後のメッセージ順序問題も発生しない。
 
 export default function script(
-  event: InputEvent,
+  event: Input<"/t2/object_augmentor/augmented_scene">,
   globalVars: GlobalVariables,
-): Output | undefined {
+): Output {
 
-  // =========================================================================
-  // bev_detection 受信: ターゲットを世界座標で検索し local_position を保存
-  // =========================================================================
-  if (event.topic === "/t2/bev_detection/objects") {
-    const msg = event.message as unknown as { detected_objects: InDetObj[] };
-    const detected: InDetObj[] = msg.detected_objects ?? [];
+  const msg = event.message as unknown as {
+    header: Header;
+    augmented_objects: InAugObj[];
+    local_map_info: { local_lane_segments: InLaneSeg[] };
+  };
 
-    const hasTarget =
-      typeof globalVars.target_x === "number" &&
-      typeof globalVars.target_y === "number" &&
-      typeof globalVars.target_z === "number";
-    const thresholdM =
-      typeof globalVars.threshold_m === "number" ? globalVars.threshold_m : 1.0;
+  const segments: InLaneSeg[] = msg.local_map_info?.local_lane_segments ?? [];
+  const augObjects: InAugObj[] = msg.augmented_objects ?? [];
 
-    storedTargetFound = false;
-    storedTargetLocalPos = zeroVec3();
-    storedTargetWidth = 0;
-    storedTargetRawId = -1;
-    storedTargetMatchDist = -1;
+  // track_id でターゲットを検索 (augmented_objects から直接, 同一フレーム)
+  const wantTrackId = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
+  let targetFound = false;
+  let effectiveLocalPos = zeroVec3();
+  let effectiveWidth = 0;
+  let targetTrackId = -1;
 
-    if (hasTarget) {
-      const tw: Vec3 = {
-        x: globalVars.target_x as number,
-        y: globalVars.target_y as number,
-        z: globalVars.target_z as number,
-      };
-      let bestD = Number.POSITIVE_INFINITY;
-      for (const o of detected) {
-        if (!isValidVec3(o.position)) continue;
-        const d = dist3(o.position as Vec3, tw);
-        if (d < bestD) {
-          bestD = d;
-          storedTargetRawId = typeof o.id === "number" ? o.id : -1;
-          storedTargetLocalPos = isValidVec3(o.local_position)
-            ? copyVec3(o.local_position as Vec3) : zeroVec3();
-          storedTargetWidth = typeof o.width === "number" ? o.width : 0;
-          storedTargetFound = true;
-        }
-      }
-      storedTargetMatchDist = bestD === Number.POSITIVE_INFINITY ? -1 : bestD;
-      if (bestD > thresholdM) storedTargetFound = false;
+  if (wantTrackId >= 0) {
+    for (const ao of augObjects) {
+      const bi = ao.bbox_info;
+      const tid = typeof ao.track_id === "number" ? ao.track_id
+        : (ao.tracking_info && typeof ao.tracking_info.track_id === "number") ? ao.tracking_info.track_id
+        : typeof bi.id === "number" ? bi.id : -1;
+      if (tid !== wantTrackId) continue;
+      if (!isValidVec3(bi.local_position)) continue;
+      effectiveLocalPos = copyVec3(bi.local_position as Vec3);
+      effectiveWidth = typeof bi.width === "number" ? bi.width : 0;
+      targetTrackId = tid;
+      targetFound = true;
+      break;
     }
-    // return undefined せず、下の出力計算に落ちる
-    // (storedSceneReceived が true なら stored scene データで出力)
   }
-
-  // =========================================================================
-  // augmented_scene 受信: シーンデータを保存
-  // =========================================================================
-  if (event.topic === "/t2/object_augmentor/augmented_scene") {
-    const msg = event.message as unknown as {
-      header: Header;
-      augmented_objects: InAugObj[];
-      local_map_info: { local_lane_segments: InLaneSeg[] };
-    };
-    storedSceneHeader = msg.header;
-    storedSceneSegments = msg.local_map_info?.local_lane_segments ?? [];
-    storedSceneAugObjects = msg.augmented_objects ?? [];
-    storedSceneReceived = true;
-  }
-
-  // =========================================================================
-  // 出力計算: bev_detection / augmented_scene どちらの到着でも実行
-  // (Seek 後にどちらが先に来ても正しく動作する)
-  // =========================================================================
-  if (!storedSceneReceived) return undefined;
-
-  const segments = storedSceneSegments;
-
-  const hasTarget =
-    typeof globalVars.target_x === "number" &&
-    typeof globalVars.target_y === "number" &&
-    typeof globalVars.target_z === "number";
-  const targetWorld: Vec3 = hasTarget
-    ? { x: globalVars.target_x as number, y: globalVars.target_y as number, z: globalVars.target_z as number }
-    : zeroVec3();
-  const thresholdM =
-    typeof globalVars.threshold_m === "number" ? globalVars.threshold_m : 1.0;
 
   // available_segments
   const availableSegments: SegmentSummary[] = [];
   for (const s of segments) {
-    const d = (storedTargetFound && s.central_curve.length > 0)
-      ? minDist(storedTargetLocalPos, s.central_curve) : -1;
+    const d = (targetFound && s.central_curve.length > 0)
+      ? minDist(effectiveLocalPos, s.central_curve) : -1;
     availableSegments.push({ id: s.id, is_target_lane: s.is_target_lane, dist_to_target_m: d });
   }
 
-  // セグメント選択
-  // セグメント選択 (Cartesian 用): ターゲットに最も近い central_curve を持つセグメント
+  // セグメント選択 (Cartesian 用)
   let foundSeg: InLaneSeg | undefined;
-  if (storedTargetFound) {
+  if (targetFound) {
     let bestDist = Number.POSITIVE_INFINITY;
     for (const s of segments) {
       if (s.central_curve.length === 0) continue;
-      const d = minDist(storedTargetLocalPos, s.central_curve);
+      const d = minDist(effectiveLocalPos, s.central_curve);
       if (d < bestDist) { bestDist = d; foundSeg = s; }
     }
   } else {
@@ -658,32 +579,15 @@ export default function script(
   const leftCurve: Vec3[] = segmentFound ? foundSeg!.left_boundary.curve : [];
   const rightCurve: Vec3[] = segmentFound ? foundSeg!.right_boundary.curve : [];
 
-  // augmented_objects から同一フレームの local_position を取得 (SL 計算精度向上)
-  // bev_detection の raw_id で照合し、augmented_scene と同じ座標系にする
-  let effectiveLocalPos = copyVec3(storedTargetLocalPos);
-  let effectiveWidth = storedTargetWidth;
-  let sameFrameMatch = false;
-
-  if (storedTargetFound && storedTargetRawId >= 0) {
-    for (const ao of storedSceneAugObjects) {
-      if (ao.bbox_info.id === storedTargetRawId && isValidVec3(ao.bbox_info.local_position)) {
-        effectiveLocalPos = copyVec3(ao.bbox_info.local_position as Vec3);
-        if (typeof ao.bbox_info.width === "number") effectiveWidth = ao.bbox_info.width;
-        sameFrameMatch = true;
-        break;
-      }
-    }
-  }
-
   // セグメント結合 (SL + Cartesian 共通)
-  const chained = storedTargetFound
+  const chained = targetFound
     ? chainLaneBidir(segments)
     : { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
   const slLeftCurve: Vec3[] = chained.left.length > 0 ? chained.left : leftCurve;
   const slRightCurve: Vec3[] = chained.right.length > 0 ? chained.right : rightCurve;
 
   // 距離計算 (結合済み boundary + 2D 距離)
-  const canCompute = segmentFound && storedTargetFound;
+  const canCompute = segmentFound && targetFound;
   let distLeft = 0; let nearestLeft = zeroVec3(); let nearestLeftIdx = -1;
   let distRight = 0; let nearestRight = zeroVec3();
 
@@ -771,9 +675,8 @@ export default function script(
   }
 
   return {
-    header: storedSceneHeader,
-    target_world: targetWorld,
-    threshold_m: thresholdM,
+    header: msg.header,
+    track_id_input: wantTrackId,
     segment_found: segmentFound,
     segment_id: foundSeg ? foundSeg.id : "",
     segment_is_target_lane: segmentFound ? foundSeg!.is_target_lane : false,
@@ -781,14 +684,10 @@ export default function script(
     left_boundary_point_count: leftCurve.length,
     right_boundary_curve: rightCurve,
     right_boundary_point_count: rightCurve.length,
-    target_object_found: storedTargetFound,
-    target_object_raw_id: storedTargetRawId,
-    target_object_local_position: copyVec3(storedTargetLocalPos),
-    target_object_width: storedTargetWidth,
-    target_object_world_match_dist_m: storedTargetMatchDist,
-    target_same_frame_match: sameFrameMatch,
-    target_effective_local_position: copyVec3(effectiveLocalPos),
-    target_effective_width: effectiveWidth,
+    target_found: targetFound,
+    target_track_id: targetTrackId,
+    target_local_position: copyVec3(effectiveLocalPos),
+    target_width: effectiveWidth,
     distance_computed: canCompute,
     distance_to_left_boundary_m: distLeft,
     distance_target_edge_to_left_boundary_m: distEdgeLeft,
