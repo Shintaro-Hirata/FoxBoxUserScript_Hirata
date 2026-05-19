@@ -598,7 +598,11 @@ export default function script(
 
   // ターゲット: bev_detection データのみ使用 (augmented_scene の width=2.5 バグ回避)
   const wantTrackId = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
-  const targetFound = storedBevFound && storedRefFound && wantTrackId >= 0;
+  const hasWorldTarget =
+    typeof globalVars.target_x === "number" &&
+    typeof globalVars.target_y === "number" &&
+    typeof globalVars.target_z === "number";
+  const targetFound = storedBevFound && storedRefFound && (wantTrackId >= 0 || hasWorldTarget);
   const effectiveLocalPos = storedBevFound ? copyVec3(storedBevLocalPos) : zeroVec3();
   const effectiveWidth = storedBevFound ? storedBevWidth : 0;
   const targetTrackId = storedTrackId;
