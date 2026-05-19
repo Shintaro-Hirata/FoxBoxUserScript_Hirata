@@ -1,83 +1,34 @@
 // ============================================================================
-// Left boundary tracker + distance calculator  v13
+// Lane boundary tracker + SL distance calculator  v15
 //
-// /t2/object_augmentor/augmented_scene と /t2/bev_detection/objects を購読し、
-// 指定した世界座標に近い物体から、指定レーンセグメントの左境界線までの距離を算出する。
+// /t2/object_augmentor/augmented_scene を購読し、track_id で指定した物体から
+// ターゲット最近傍セグメントの左右境界線までの距離を SL 座標系で算出する。
 //
-// 修正履歴:
-//   v1-v2 : 基本実装
-//   v3     : curve_point_index による curve 上の特定点の指定を追加
-//   v4     : distance_target_edge_to_selected_y_m を追加
-//            = target.local_position.y - selected_point.y - (target.width * 0.5)
-//   v5     : ターゲット検索を /t2/bev_detection/objects に変更
-//            augmented_objects の bbox_info は local_position のみ保持し world 座標を
-//            持たないため、target_object スクリプトと同一ロジック (world 座標検索) で
-//            bev_detection から local_position を取得してから距離計算する。
-//   v6     : SL 座標系 (Frenet) への変換を追加
-//            central_curve を基準に target/left/right boundary を s(弧長)/l(符号付き横距離)
-//            に変換し、SL 空間での車両端↔白線距離を出力する。
-//   v7     : 座標フレーム不一致の修正
-//            bev_detection (T1) の local_position と augmented_scene (T2) の central_curve
-//            は異なる時刻の車両フレームで、自車移動により SL 投影がずれる問題を修正。
-//            augmented_objects から同一 raw_id の bbox_info.local_position を取得し、
-//            augmented_scene と同一フレームで距離・SL 計算を行うようにした。
-//   v7.1   : 左白線 SL 距離の符号修正 (leftL-targetL → targetL-leftL)
-//   v8     : S 原点を自車最近傍点に変更 (社内 Python 版 vehicle_coord_to_sl と統一)
-//            S=0 は自車原点 (0,0) に最も近い central_curve 頂点。
-//            前方 (curve 方向) が正、後方が負。target_s_m≈50 → 目標物は約 50m 先。
-//   v9     : 複数セグメント結合 (chainLaneForward)
-//            ego → target 方向に endpoint 近接で lane segment を順次結合し、
-//            1 本の長い central_curve / left / right boundary で SL 計算。
-//            これにより central_curve 全長 86m の制限を超えて 100m+ の S に対応。
-//   v9.1   : 双方向結合 (chainLaneBidir) に変更
-//            ego segment を常に +x 方向に固定し、前方・後方の両方向へ結合。
-//            ターゲットが後方にあるときも正しく S<0 を返す。
-//   v10    : セグメント結合の精度向上
-//            (1) road_id が利用可能なら同一 road_id のセグメントのみ結合
-//            (2) road_id なしでも横方向チェック (perpDist < 3m) で他車線を排除
-//            (3) 近接点除去閾値を 0.5m → 0.01m に縮小 (S 精度維持)
-//   v11    : successor_ids / predecessor_ids による ID ベース結合を優先
-//            データに接続情報があれば ID で正確に次セグメントを辿る。
-//            なければ road_id → endpoint + 横方向チェックにフォールバック。
-//   v12    : /t2/lane_creator/output の lane_center_curve を central_curve に採用
-//            ego lane 全体の連続 polyline (1041点) が提供されるため、
-//            セグメント結合不要・高精度・レーン全長カバー。
-//            lane_creator がない場合は v11 の chainLaneBidir にフォールバック。
-//
-// 入力:   /t2/object_augmentor/augmented_scene
-//         /t2/bev_detection/objects
+// 入力:   /t2/object_augmentor/augmented_scene (単一トピック)
 // 出力:   /studio_script/lane_boundary_tracker
 //
 // Variables パネルで設定する変数:
-//   lane_segment_id   : string  (省略可。省略時 → ターゲットに最近傍の segment を自動選択)
-//   target_x          : number  (世界座標。target_object スクリプトと同じ値)
-//   target_y          : number
-//   target_z          : number
-//   threshold_m        : number  (省略時 1.0m)
-//   curve_point_index  : number  (left_boundary.curve の配列インデックス。省略可)
+//   track_id : number  (追跡する物体の track_id。target_object と同じ値)
 //
-// セグメント選択ロジック:
-//   (A) lane_segment_id 設定あり → id 完全一致で選択 (手動指定)
-//   (B) 未設定 & ターゲット取得済み → central_curve への最短距離で自動選択
-//   (C) 未設定 & ターゲットなし → is_target_lane=true を fallback
+// ターゲット検索:
+//   augmented_objects から track_id (bbox_info.id 等) で直接検索。
+//   bev_detection 不要、Seek 時のターゲット消失なし。
 //
-// 主な出力フィールド:
-//   distance_to_left_boundary_m          : ターゲット ↔ 左境界 curve 全体の最短距離
-//   distance_target_edge_to_selected_y_m : target.local_y - selected.y - width/2
-//   selected_point                        : curve_point_index で指定した curve 上の点
-//   available_segments                    : 全 segment の id と距離一覧 (id 確認用)
-//   ---- SL 座標系 (v6) ----
-//   target_s_m / target_l_m              : central_curve を基準にした target の SL
-//   left_boundary_l_at_target_s_m        : target と同じ s 位置での左白線の L 値
-//   distance_target_to_left_boundary_sl_m: targetL - leftL (Cartesian の target.y - boundary.y と同符号)
-//   distance_target_edge_to_left_boundary_sl_m: 上記から target.width/2 を引いた端-白線距離
-//   (right_boundary も同様)
-// ----------------------------------------------------------------------------
-// SL 座標系の定義:
-//   S: central_curve の始点 (curve[0]) からポリライン沿いに測った累積弧長 [m]
-//   L: central_curve に対する横方向距離 (2D x-y 平面, 右手系で左が正) [m]
-//   L > 0 → central_curve 進行方向の左側 (左白線があるはずの側)
-//   L < 0 → central_curve 進行方向の右側
+// セグメント選択:
+//   (A) ターゲット取得済み → central_curve への 2D 最短距離で自動選択
+//   (B) ターゲットなし → is_target_lane=true を fallback
+//   白線 (left/right boundary) はターゲット最近傍セグメントから取得。
+//
+// SL 計算:
+//   central_curve は ego レーンを successor_ids/predecessor_ids で ID ベース結合。
+//   S=0 は自車の polyline 投影点。正=前方, 負=後方。
+//   白線の L 値はターゲットの S 位置で線形補間。
+//
+// 主な出力:
+//   target_s_m / target_l_m              : SL 座標
+//   distance_target_edge_to_left_boundary_sl_m  : 車両端↔左白線 (SL)
+//   distance_target_edge_to_right_boundary_sl_m : 車両端↔右白線 (SL)
+//   distance_target_edge_to_left_boundary_m     : 同上 (Cartesian 参考値)
 // ============================================================================
 
 import { Input } from "./types";
@@ -558,17 +509,17 @@ export default function script(
   const availableSegments: SegmentSummary[] = [];
   for (const s of segments) {
     const d = (targetFound && s.central_curve.length > 0)
-      ? minDist(effectiveLocalPos, s.central_curve) : -1;
+      ? ptCurve2D(effectiveLocalPos, s.central_curve).dist : -1;
     availableSegments.push({ id: s.id, is_target_lane: s.is_target_lane, dist_to_target_m: d });
   }
 
-  // セグメント選択 (Cartesian 用)
+  // セグメント選択: ターゲットに最も近い central_curve を持つセグメント (2D)
   let foundSeg: InLaneSeg | undefined;
   if (targetFound) {
     let bestDist = Number.POSITIVE_INFINITY;
     for (const s of segments) {
       if (s.central_curve.length === 0) continue;
-      const d = minDist(effectiveLocalPos, s.central_curve);
+      const d = ptCurve2D(effectiveLocalPos, s.central_curve).dist;
       if (d < bestDist) { bestDist = d; foundSeg = s; }
     }
   } else {
