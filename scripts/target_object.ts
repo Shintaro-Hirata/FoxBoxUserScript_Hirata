@@ -105,13 +105,36 @@ function getTrackId(ao: InAugObj): number {
   return -1;
 }
 
-export const inputs = ["/t2/object_augmentor/augmented_scene"];
+// augmented_scene の width が全物体 2.5 に固定されるバグ回避用
+const storedWidthById = new Map<number, number>();
+
+export const inputs = [
+  "/t2/object_augmentor/augmented_scene",
+  "/t2/bev_detection/objects",
+];
 export const output = "/studio_script/target_object";
 
+type InputEvent =
+  | Input<"/t2/object_augmentor/augmented_scene">
+  | Input<"/t2/bev_detection/objects">;
+
 export default function script(
-  event: Input<"/t2/object_augmentor/augmented_scene">,
+  event: InputEvent,
   globalVars: GlobalVariables,
-): Output {
+): Output | undefined {
+
+  if (event.topic === "/t2/bev_detection/objects") {
+    const bmsg = event.message as unknown as {
+      detected_objects: { id?: number; width?: number }[];
+    };
+    for (const o of bmsg.detected_objects ?? []) {
+      if (typeof o.id === "number" && typeof o.width === "number") {
+        storedWidthById.set(o.id, o.width);
+      }
+    }
+    return undefined;
+  }
+
   const msg = event.message as unknown as {
     header: Header;
     augmented_objects: InAugObj[];
@@ -156,7 +179,9 @@ export default function script(
       local_position_valid: hasLocal,
       local_theta: typeof bi.local_theta === "number" ? bi.local_theta : 0,
       length:     typeof bi.length     === "number" ? bi.length     : 0,
-      width:      typeof bi.width      === "number" ? bi.width      : 0,
+      width:      (typeof bi.id === "number" && storedWidthById.has(bi.id))
+                    ? storedWidthById.get(bi.id)!
+                    : typeof bi.width === "number" ? bi.width : 0,
       height:     typeof bi.height     === "number" ? bi.height     : 0,
       type:       objType,
       sub_type:   objSubType,

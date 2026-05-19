@@ -466,18 +466,45 @@ function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
   return { valid: true, l: lArr[last]!, bracketMode: "fallback" };
 }
 
+// --- モジュール変数 (bev_detection から width を取得) -------------------------
+// augmented_scene の bbox_info.width が全物体 2.5 に固定されるバグがあるため、
+// bev_detection から正しい width を取得して id → width のマップに保存する。
+const storedWidthById = new Map<number, number>();
+
 // ===========================================================================
-export const inputs = ["/t2/object_augmentor/augmented_scene"];
+export const inputs = [
+  "/t2/object_augmentor/augmented_scene",
+  "/t2/bev_detection/objects",
+];
 export const output = "/studio_script/lane_boundary_tracker";
 
-// track_id → augmented_objects から直接検索するため、bev_detection 不要。
-// 単一トピックなので Seek 後のメッセージ順序問題も発生しない。
+type InputEvent =
+  | Input<"/t2/object_augmentor/augmented_scene">
+  | Input<"/t2/bev_detection/objects">;
 
 export default function script(
-  event: Input<"/t2/object_augmentor/augmented_scene">,
+  event: InputEvent,
   globalVars: GlobalVariables,
-): Output {
+): Output | undefined {
 
+  // =========================================================================
+  // bev_detection 受信: 各物体の正しい width を id → width マップに保存
+  // =========================================================================
+  if (event.topic === "/t2/bev_detection/objects") {
+    const msg = event.message as unknown as {
+      detected_objects: { id?: number; width?: number }[];
+    };
+    for (const o of msg.detected_objects ?? []) {
+      if (typeof o.id === "number" && typeof o.width === "number") {
+        storedWidthById.set(o.id, o.width);
+      }
+    }
+    return undefined;
+  }
+
+  // =========================================================================
+  // augmented_scene 受信: メイン処理
+  // =========================================================================
   const msg = event.message as unknown as {
     header: Header;
     augmented_objects: InAugObj[];
@@ -503,7 +530,11 @@ export default function script(
       if (tid !== wantTrackId) continue;
       if (!isValidVec3(bi.local_position)) continue;
       effectiveLocalPos = copyVec3(bi.local_position as Vec3);
-      effectiveWidth = typeof bi.width === "number" ? bi.width : 0;
+      // width: bev_detection の正しい値を優先、なければ augmented_scene の値
+      const bboxId = typeof bi.id === "number" ? bi.id : -1;
+      const bevWidth = bboxId >= 0 ? storedWidthById.get(bboxId) : undefined;
+      effectiveWidth = bevWidth != null ? bevWidth
+        : typeof bi.width === "number" ? bi.width : 0;
       targetTrackId = tid;
       targetFound = true;
       break;
