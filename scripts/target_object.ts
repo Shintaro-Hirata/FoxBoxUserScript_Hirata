@@ -14,12 +14,18 @@
 //         target_y    : number  -- 世界座標系での y
 //         target_z    : number  -- 世界座標系での z
 //         threshold_m : number  -- 各軸の一致判定に使う閾値 (省略時 1.0m)
+//         target_length : number -- ターゲットの長さ (省略時フィルタなし)
+//         target_width  : number -- ターゲットの幅 (省略時フィルタなし)
+//         target_height : number -- ターゲットの高さ (省略時フィルタなし)
+//         size_threshold_m : number -- 寸法の一致閾値 (省略時 1.0m)
+//         target_type     : number -- 物体タイプ (省略時フィルタなし)
+//         target_sub_type : number -- サブタイプ (省略時フィルタなし)
 //   (B) 下の DEFAULT_* 定数を書き換えて保存
 //
-// マッチ条件 (per-axis):
-//   |obj.position.x - target_x| < threshold_m
-//   AND |obj.position.y - target_y| < threshold_m
-//   AND |obj.position.z - target_z| < threshold_m
+// マッチ条件:
+//   位置: |obj.position.x - target_x| < threshold_m  (各軸)
+//   寸法 (設定時のみ): |obj.length - target_length| < size_threshold_m  (各寸法)
+//   タイプ (設定時のみ): obj.type === target_type, obj.sub_type === target_sub_type
 //
 // ターゲット座標の求め方:
 //   Raw Messages で /t2/bev_detection/objects を開き、追跡したい物体の
@@ -33,6 +39,12 @@ type GlobalVariables = {
   target_y?: number;
   target_z?: number;
   threshold_m?: number;
+  target_length?: number;
+  target_width?: number;
+  target_height?: number;
+  size_threshold_m?: number;
+  target_type?: number;
+  target_sub_type?: number;
 };
 
 // Variables が未設定のときに使うデフォルト (ここを編集して使ってもOK)
@@ -160,6 +172,13 @@ export default function script(
   };
   const thresholdM =
     typeof globalVars.threshold_m === "number" ? globalVars.threshold_m : DEFAULT_THRESHOLD_M;
+  const sizeThresholdM =
+    typeof globalVars.size_threshold_m === "number" ? globalVars.size_threshold_m : 1.0;
+  const wantLength = typeof globalVars.target_length === "number" ? globalVars.target_length : -1;
+  const wantWidth  = typeof globalVars.target_width  === "number" ? globalVars.target_width  : -1;
+  const wantHeight = typeof globalVars.target_height === "number" ? globalVars.target_height : -1;
+  const wantType    = typeof globalVars.target_type     === "number" ? globalVars.target_type     : -1;
+  const wantSubType = typeof globalVars.target_sub_type === "number" ? globalVars.target_sub_type : -1;
 
   const msg = event.message as unknown as {
     header: Header;
@@ -177,7 +196,15 @@ export default function script(
     detectedWithPosition++;
     const c = buildCandidate(o as InDetectedObject & { position: Vec3 }, target, thresholdM);
     if (c.distance_m < nearestDist) { nearestDist = c.distance_m; nearest = c; }
-    if (c.within_threshold) withinThreshold.push(c);
+    if (!c.within_threshold) continue;
+    // 寸法フィルタ (設定時のみ)
+    if (wantLength >= 0 && Math.abs(c.length - wantLength) >= sizeThresholdM) continue;
+    if (wantWidth  >= 0 && Math.abs(c.width  - wantWidth)  >= sizeThresholdM) continue;
+    if (wantHeight >= 0 && Math.abs(c.height - wantHeight) >= sizeThresholdM) continue;
+    // タイプフィルタ (設定時のみ、完全一致)
+    if (wantType    >= 0 && c.type     !== wantType) continue;
+    if (wantSubType >= 0 && c.sub_type !== wantSubType) continue;
+    withinThreshold.push(c);
   }
 
   withinThreshold.sort((a, b) => a.distance_m - b.distance_m);
