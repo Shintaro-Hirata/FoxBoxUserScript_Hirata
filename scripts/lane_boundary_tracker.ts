@@ -467,14 +467,17 @@ function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
 }
 
 // --- モジュール変数 -----------------------------------------------------------
-// augmented_scene の track_id でターゲットを特定し、その local_position を参照座標として
-// bev_detection から最近傍物体を探す。bev_detection のデータ (local_position, width 等)
-// は augmented_scene より正確 (width=2.5 バグ回避 + 検出精度)。
 let storedRefLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
 let storedRefFound = false;
 let storedBevLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
 let storedBevWidth = 0;
 let storedBevFound = false;
+// augmented_scene のデータを保存 (bev_detection 到着時にも出力するため)
+let storedSceneHeader: Header = { seq: 0, stamp: { sec: 0, nsec: 0 }, frame_id: "" };
+let storedSceneSegments: InLaneSeg[] = [];
+let storedSceneAugObjects: InAugObj[] = [];
+let storedSceneReceived = false;
+let storedTrackId = -1;
 
 // ===========================================================================
 export const inputs = [
@@ -514,50 +517,54 @@ export default function script(
         }
       }
     }
-    return undefined;
+    // return undefined せず、storedScene データがあれば下で出力
+    if (!storedSceneReceived) return undefined;
   }
 
   // =========================================================================
-  // augmented_scene 受信: メイン処理
+  // augmented_scene 受信: シーンデータを保存
   // =========================================================================
-  const msg = event.message as unknown as {
-    header: Header;
-    augmented_objects: InAugObj[];
-    local_map_info: { local_lane_segments: InLaneSeg[] };
-  };
+  if (event.topic === "/t2/object_augmentor/augmented_scene") {
+    const amsg = event.message as unknown as {
+      header: Header;
+      augmented_objects: InAugObj[];
+      local_map_info: { local_lane_segments: InLaneSeg[] };
+    };
+    storedSceneHeader = amsg.header;
+    storedSceneSegments = amsg.local_map_info?.local_lane_segments ?? [];
+    storedSceneAugObjects = amsg.augmented_objects ?? [];
+    storedSceneReceived = true;
 
-  const segments: InLaneSeg[] = msg.local_map_info?.local_lane_segments ?? [];
-  const augObjects: InAugObj[] = msg.augmented_objects ?? [];
-
-  // track_id でターゲットを検索 (augmented_objects から直接, 同一フレーム)
-  const wantTrackId = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
-  let targetFound = false;
-  let effectiveLocalPos = zeroVec3();
-  let effectiveWidth = 0;
-  let targetTrackId = -1;
-
-  if (wantTrackId >= 0) {
-    for (const ao of augObjects) {
-      const bi = ao.bbox_info;
-      const tid = typeof ao.track_id === "number" ? ao.track_id
-        : (ao.tracking_info && typeof ao.tracking_info.track_id === "number") ? ao.tracking_info.track_id
-        : typeof bi.id === "number" ? bi.id : -1;
-      if (tid !== wantTrackId) continue;
-      if (!isValidVec3(bi.local_position)) continue;
-      // 参照座標を保存 (bev_detection でのマッチング用)
-      storedRefLocalPos = copyVec3(bi.local_position as Vec3);
-      storedRefFound = true;
-      targetTrackId = tid;
-      // bev_detection データがある場合のみ距離計算を有効化
-      // augmented_scene の position/width は距離計算に使わない (width=2.5 バグ回避)
-      if (storedBevFound) {
-        effectiveLocalPos = copyVec3(storedBevLocalPos);
-        effectiveWidth = storedBevWidth;
-        targetFound = true;
+    // track_id で参照座標を更新
+    const wantTid = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
+    if (wantTid >= 0) {
+      for (const ao of storedSceneAugObjects) {
+        const bi = ao.bbox_info;
+        const tid = typeof ao.track_id === "number" ? ao.track_id
+          : (ao.tracking_info && typeof ao.tracking_info.track_id === "number") ? ao.tracking_info.track_id
+          : typeof bi.id === "number" ? bi.id : -1;
+        if (tid !== wantTid) continue;
+        if (!isValidVec3(bi.local_position)) continue;
+        storedRefLocalPos = copyVec3(bi.local_position as Vec3);
+        storedRefFound = true;
+        storedTrackId = tid;
+        break;
       }
-      break;
     }
   }
+
+  // =========================================================================
+  // 出力計算: どちらのトピック到着でも実行
+  // =========================================================================
+  const segments = storedSceneSegments;
+  const augObjects = storedSceneAugObjects;
+
+  // ターゲット: bev_detection データのみ使用 (augmented_scene の width=2.5 バグ回避)
+  const wantTrackId = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
+  const targetFound = storedBevFound && storedRefFound && wantTrackId >= 0;
+  const effectiveLocalPos = storedBevFound ? copyVec3(storedBevLocalPos) : zeroVec3();
+  const effectiveWidth = storedBevFound ? storedBevWidth : 0;
+  const targetTrackId = storedTrackId;
 
   // available_segments
   const availableSegments: SegmentSummary[] = [];
@@ -701,7 +708,7 @@ export default function script(
     ? nearestBdDist - effectiveWidth * 0.5 : 0;
 
   return {
-    header: msg.header,
+    header: storedSceneHeader,
     track_id_input: wantTrackId,
     segment_found: segmentFound,
     segment_id: foundSeg ? foundSeg.id : "",
