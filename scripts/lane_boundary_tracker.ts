@@ -91,6 +91,7 @@ type Output = {
   right_boundary_point_count: number;
   target_found: boolean;
   target_track_id: number;
+  bev_match_distance_m: number;
   target_local_position: Vec3;
   target_width: number;
   distance_computed: boolean;
@@ -472,6 +473,7 @@ let storedRefLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
 let storedRefFound = false;
 let storedBevLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
 let storedBevWidth = 0;
+let storedBevMatchDist = -1;
 let storedBevFound = false;
 // augmented_scene のデータを保存 (bev_detection 到着時にも出力するため)
 let storedSceneHeader: Header = { seq: 0, stamp: { sec: 0, nsec: 0 }, frame_id: "" };
@@ -500,7 +502,7 @@ export default function script(
   // bev_detection 受信: 参照座標に最も近い物体の local_position / width を保存
   // =========================================================================
   if (event.topic === "/t2/bev_detection/objects") {
-    const threshM = globalVars.threshold_m != null ? Number(globalVars.threshold_m) : 1.0;
+    const threshM = globalVars.threshold_m != null ? Number(globalVars.threshold_m) : 5.0;
     if (storedRefFound) {
       const bmsg = event.message as unknown as {
         detected_objects: {
@@ -517,6 +519,7 @@ export default function script(
           storedBevWidth = typeof o.width === "number" ? o.width : 0;
         }
       }
+      storedBevMatchDist = bestD < Number.POSITIVE_INFINITY ? bestD : -1;
       storedBevFound = bestD <= threshM;
     }
     // return undefined せず、storedScene データがあれば下で出力
@@ -721,6 +724,7 @@ export default function script(
     right_boundary_point_count: rightCurve.length,
     target_found: targetFound,
     target_track_id: targetTrackId,
+    bev_match_distance_m: storedBevMatchDist,
     target_local_position: copyVec3(effectiveLocalPos),
     target_width: effectiveWidth,
     distance_computed: canCompute,
