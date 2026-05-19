@@ -39,6 +39,9 @@ type Header = { seq: number; stamp: Stamp; frame_id: string };
 
 type GlobalVariables = {
   track_id?: number | string;
+  target_x?: number;
+  target_y?: number;
+  target_z?: number;
   threshold_m?: number | string;
 };
 
@@ -499,16 +502,24 @@ export default function script(
 ): Output | undefined {
 
   // =========================================================================
-  // bev_detection 受信: 参照座標に最も近い物体の local_position / width を保存
+  // bev_detection 受信: ターゲットのマッチングと local_position / width の保存
   // =========================================================================
   if (event.topic === "/t2/bev_detection/objects") {
     const threshM = globalVars.threshold_m != null ? Number(globalVars.threshold_m) : 5.0;
-    if (storedRefFound) {
-      const bmsg = event.message as unknown as {
-        detected_objects: {
-          id?: number; local_position?: Vec3; width?: number;
-        }[];
-      };
+    const wantTid = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
+    const hasWorldTarget =
+      typeof globalVars.target_x === "number" &&
+      typeof globalVars.target_y === "number" &&
+      typeof globalVars.target_z === "number";
+
+    const bmsg = event.message as unknown as {
+      detected_objects: {
+        id?: number; position?: Vec3; local_position?: Vec3; width?: number;
+      }[];
+    };
+
+    if (wantTid >= 0 && storedRefFound) {
+      // (A) track_id 方式: augmented_scene の参照座標に最も近い local_position でマッチ
       let bestD = Number.POSITIVE_INFINITY;
       for (const o of bmsg.detected_objects ?? []) {
         if (!isValidVec3(o.local_position)) continue;
@@ -521,8 +532,29 @@ export default function script(
       }
       storedBevMatchDist = bestD < Number.POSITIVE_INFINITY ? bestD : -1;
       storedBevFound = bestD <= threshM;
+    } else if (hasWorldTarget) {
+      // (B) world 座標方式: target_x/y/z に最も近い position (世界座標) でマッチ
+      const tw: Vec3 = {
+        x: globalVars.target_x as number,
+        y: globalVars.target_y as number,
+        z: globalVars.target_z as number,
+      };
+      let bestD = Number.POSITIVE_INFINITY;
+      for (const o of bmsg.detected_objects ?? []) {
+        if (!isValidVec3(o.position)) continue;
+        const d = dist3(o.position as Vec3, tw);
+        if (d < bestD && isValidVec3(o.local_position)) {
+          bestD = d;
+          storedBevLocalPos = copyVec3(o.local_position as Vec3);
+          storedBevWidth = typeof o.width === "number" ? o.width : 0;
+          storedRefFound = true;
+        }
+      }
+      storedBevMatchDist = bestD < Number.POSITIVE_INFINITY ? bestD : -1;
+      storedBevFound = bestD <= threshM;
+      storedTrackId = -1;
     }
-    // return undefined せず、storedScene データがあれば下で出力
+
     if (!storedSceneReceived) return undefined;
   }
 
