@@ -1,67 +1,38 @@
 // ============================================================================
-// Target object finder for /t2/bev_detection/objects
+// Target object finder for /t2/object_augmentor/augmented_scene  v2
 //
-// 指定した座標 (target_x, target_y, target_z) に最も近い物体を毎フレーム探し、
-// x/y/z すべてが閾値(threshold_m)以内なら「マッチ」として情報を出力する。
-// トラッカー状態を持たないので Seek/Scrub しても即時に結果が出る。
+// augmented_scene の augmented_objects から、指定した track_id の物体を毎フレーム
+// 探して情報を出力する。track_id はシーンをまたいで安定するため、
+// bev_detection の position マッチングより確実にターゲットを追跡できる。
 //
-// 入力:   /t2/bev_detection/objects
+// 入力:   /t2/object_augmentor/augmented_scene
 // 出力:   /studio_script/target_object
 //
-// ターゲット座標の指定方法 (どちらか / 両方。GlobalVariables が優先):
-//   (A) Variables パネルに下記変数を作る
-//         target_x    : number  -- 世界座標系での x
-//         target_y    : number  -- 世界座標系での y
-//         target_z    : number  -- 世界座標系での z
-//         threshold_m : number  -- 各軸の一致判定に使う閾値 (省略時 1.0m)
-//         target_length : number -- ターゲットの長さ (省略時フィルタなし)
-//         target_width  : number -- ターゲットの幅 (省略時フィルタなし)
-//         target_height : number -- ターゲットの高さ (省略時フィルタなし)
-//         size_threshold_m : number -- 寸法の一致閾値 (省略時 1.0m)
-//         target_type     : number -- 物体タイプ (省略時フィルタなし)
-//         target_sub_type : number -- サブタイプ (省略時フィルタなし)
-//   (B) 下の DEFAULT_* 定数を書き換えて保存
+// Variables パネルで設定する変数:
+//   track_id        : number  -- 追跡する物体の track_id (bbox_info.id)
+//   target_type     : number  -- 物体タイプで絞り込み (省略可)
+//   target_sub_type : number  -- サブタイプで絞り込み (省略可)
 //
-// マッチ条件:
-//   位置: |obj.position.x - target_x| < threshold_m  (各軸)
-//   寸法 (設定時のみ): |obj.length - target_length| < size_threshold_m  (各寸法)
-//   タイプ (設定時のみ): obj.type === target_type, obj.sub_type === target_sub_type
-//
-// ターゲット座標の求め方:
-//   Raw Messages で /t2/bev_detection/objects を開き、追跡したい物体の
-//   position.x / y / z の値を一度コピー。Variables に貼り付ける。
+// track_id の確認方法:
+//   Raw Messages で /t2/object_augmentor/augmented_scene の augmented_objects を
+//   展開し、追跡したい物体の bbox_info.id (または tracking_info.track_id) を確認。
 // ============================================================================
 
 import { Input } from "./types";
 
 type GlobalVariables = {
-  target_x?: number;
-  target_y?: number;
-  target_z?: number;
-  threshold_m?: number;
-  target_length?: number;
-  target_width?: number;
-  target_height?: number;
-  size_threshold_m?: number;
+  track_id?: number | string;
   target_type?: number | string;
   target_sub_type?: number | string;
 };
-
-// Variables が未設定のときに使うデフォルト (ここを編集して使ってもOK)
-const DEFAULT_TARGET_X    = 0;
-const DEFAULT_TARGET_Y    = 0;
-const DEFAULT_TARGET_Z    = 0;
-const DEFAULT_THRESHOLD_M = 1.0;
 
 type Vec3   = { x: number; y: number; z: number };
 type Stamp  = { sec: number; nsec: number };
 type Header = { seq: number; stamp: Stamp; frame_id: string };
 
-type InDetectedObject = {
+type InBBoxInfo = {
   id?: number;
-  position?: Vec3;
   local_position?: Vec3;
-  theta?: number;
   local_theta?: number;
   length?: number;
   width?: number;
@@ -69,40 +40,40 @@ type InDetectedObject = {
   type?: number;
   sub_type?: number;
   confidence?: number;
-  timestamp?: number;
 };
 
-type CandidateObject = {
-  raw_id: number;
-  position: Vec3;
-  dx: number;
-  dy: number;
-  dz: number;
-  distance_m: number;
-  max_axis_diff_m: number;
+type InAugObj = {
+  bbox_info: InBBoxInfo;
+  tracking_info?: {
+    velocity?: Vec3;
+    track_id?: number;
+  };
+  track_id?: number;
+};
+
+type MatchedObject = {
+  track_id: number;
+  bbox_id: number;
   local_position: Vec3;
   local_position_valid: boolean;
-  theta: number;
+  local_theta: number;
   length: number;
   width: number;
   height: number;
   type: number;
   sub_type: number;
   confidence: number;
-  within_threshold: boolean;
+  velocity: Vec3;
+  velocity_valid: boolean;
 };
 
 type Output = {
   header: Header;
-  target: Vec3;
-  threshold_m: number;
+  track_id_input: number;
   match_found: boolean;
-  match_count: number;
-  detected_count: number;
-  detected_with_position_count: number;
-  matched: CandidateObject;
-  nearest: CandidateObject;
-  candidates_within_threshold: CandidateObject[];
+  augmented_object_count: number;
+  matched_index: number;
+  matched: MatchedObject;
 };
 
 function zeroVec3(): Vec3 { return { x: 0, y: 0, z: 0 }; }
@@ -114,109 +85,87 @@ function isValidVec3(v: unknown): v is Vec3 {
   return typeof o.x === "number" && typeof o.y === "number" && typeof o.z === "number";
 }
 
-function dist3(a: Vec3, b: Vec3): number {
-  const dx = a.x - b.x; const dy = a.y - b.y; const dz = a.z - b.z;
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-function emptyCandidate(): CandidateObject {
+function emptyMatched(): MatchedObject {
   return {
-    raw_id: -1, position: zeroVec3(), dx: 0, dy: 0, dz: 0,
-    distance_m: -1, max_axis_diff_m: -1, local_position: zeroVec3(),
-    local_position_valid: false, theta: 0, length: 0, width: 0,
-    height: 0, type: 0, sub_type: 0, confidence: 0, within_threshold: false,
+    track_id: -1, bbox_id: -1,
+    local_position: zeroVec3(), local_position_valid: false,
+    local_theta: 0, length: 0, width: 0, height: 0,
+    type: 0, sub_type: 0, confidence: 0,
+    velocity: zeroVec3(), velocity_valid: false,
   };
 }
 
-function buildCandidate(
-  o: InDetectedObject & { position: Vec3 },
-  target: Vec3,
-  thresholdM: number,
-): CandidateObject {
-  const dx = o.position.x - target.x;
-  const dy = o.position.y - target.y;
-  const dz = o.position.z - target.z;
-  const maxAxis = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
-  const withinThreshold =
-    Math.abs(dx) < thresholdM && Math.abs(dy) < thresholdM && Math.abs(dz) < thresholdM;
-  const hasLocal = isValidVec3(o.local_position);
-  return {
-    raw_id: typeof o.id === "number" ? o.id : -1,
-    position: copyVec3(o.position), dx, dy, dz,
-    distance_m: Math.sqrt(dx * dx + dy * dy + dz * dz),
-    max_axis_diff_m: maxAxis,
-    local_position: hasLocal ? copyVec3(o.local_position as Vec3) : zeroVec3(),
-    local_position_valid: hasLocal,
-    theta:      typeof o.theta      === "number" ? o.theta      : 0,
-    length:     typeof o.length     === "number" ? o.length     : 0,
-    width:      typeof o.width      === "number" ? o.width      : 0,
-    height:     typeof o.height     === "number" ? o.height     : 0,
-    type:       typeof o.type       === "number" ? o.type       : 0,
-    sub_type:   typeof o.sub_type   === "number" ? o.sub_type   : 0,
-    confidence: typeof o.confidence === "number" ? o.confidence : 0,
-    within_threshold: withinThreshold,
-  };
+function getTrackId(ao: InAugObj): number {
+  if (typeof ao.track_id === "number") return ao.track_id;
+  if (ao.tracking_info && typeof ao.tracking_info.track_id === "number") return ao.tracking_info.track_id;
+  if (typeof ao.bbox_info.id === "number") return ao.bbox_info.id;
+  return -1;
 }
 
-export const inputs = ["/t2/bev_detection/objects"];
+export const inputs = ["/t2/object_augmentor/augmented_scene"];
 export const output = "/studio_script/target_object";
 
 export default function script(
-  event: Input<"/t2/bev_detection/objects">,
+  event: Input<"/t2/object_augmentor/augmented_scene">,
   globalVars: GlobalVariables,
 ): Output {
-  const target: Vec3 = {
-    x: typeof globalVars.target_x === "number" ? globalVars.target_x : DEFAULT_TARGET_X,
-    y: typeof globalVars.target_y === "number" ? globalVars.target_y : DEFAULT_TARGET_Y,
-    z: typeof globalVars.target_z === "number" ? globalVars.target_z : DEFAULT_TARGET_Z,
-  };
-  const thresholdM =
-    typeof globalVars.threshold_m === "number" ? globalVars.threshold_m : DEFAULT_THRESHOLD_M;
-  const sizeThresholdM =
-    typeof globalVars.size_threshold_m === "number" ? globalVars.size_threshold_m : 1.0;
-  const wantLength = typeof globalVars.target_length === "number" ? globalVars.target_length : -1;
-  const wantWidth  = typeof globalVars.target_width  === "number" ? globalVars.target_width  : -1;
-  const wantHeight = typeof globalVars.target_height === "number" ? globalVars.target_height : -1;
-  const wantType    = globalVars.target_type    != null ? Number(globalVars.target_type)     : -1;
-  const wantSubType = globalVars.target_sub_type != null ? Number(globalVars.target_sub_type) : -1;
-
   const msg = event.message as unknown as {
     header: Header;
-    detected_objects: InDetectedObject[];
+    augmented_objects: InAugObj[];
   };
-  const detected = msg.detected_objects ?? [];
+  const augObjects: InAugObj[] = msg.augmented_objects ?? [];
 
-  let detectedWithPosition = 0;
-  let nearest: CandidateObject = emptyCandidate();
-  let nearestDist = Number.POSITIVE_INFINITY;
-  const withinThreshold: CandidateObject[] = [];
+  const wantTrackId = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
+  const wantType    = globalVars.target_type != null ? Number(globalVars.target_type) : -1;
+  const wantSubType = globalVars.target_sub_type != null ? Number(globalVars.target_sub_type) : -1;
 
-  for (const o of detected) {
-    if (!isValidVec3(o.position)) continue;
-    detectedWithPosition++;
-    const c = buildCandidate(o as InDetectedObject & { position: Vec3 }, target, thresholdM);
-    if (c.distance_m < nearestDist) { nearestDist = c.distance_m; nearest = c; }
-    if (!c.within_threshold) continue;
-    // 寸法フィルタ (設定時のみ)
-    if (wantLength >= 0 && Math.abs(c.length - wantLength) >= sizeThresholdM) continue;
-    if (wantWidth  >= 0 && Math.abs(c.width  - wantWidth)  >= sizeThresholdM) continue;
-    if (wantHeight >= 0 && Math.abs(c.height - wantHeight) >= sizeThresholdM) continue;
-    // タイプフィルタ (設定時のみ、完全一致)
-    if (wantType    >= 0 && c.type     !== wantType) continue;
-    if (wantSubType >= 0 && c.sub_type !== wantSubType) continue;
-    withinThreshold.push(c);
+  let matchFound = false;
+  let matchedIdx = -1;
+  let matched = emptyMatched();
+
+  for (let i = 0; i < augObjects.length; i++) {
+    const ao = augObjects[i]!;
+    const bi = ao.bbox_info;
+    const tid = getTrackId(ao);
+
+    // track_id フィルタ
+    if (wantTrackId >= 0 && tid !== wantTrackId) continue;
+
+    // type / sub_type フィルタ (設定時のみ)
+    const objType = typeof bi.type === "number" ? bi.type : -1;
+    const objSubType = typeof bi.sub_type === "number" ? bi.sub_type : -1;
+    if (wantType >= 0 && objType !== wantType) continue;
+    if (wantSubType >= 0 && objSubType !== wantSubType) continue;
+
+    const hasLocal = isValidVec3(bi.local_position);
+    const hasVel = ao.tracking_info != null && isValidVec3(ao.tracking_info.velocity);
+
+    matched = {
+      track_id: tid,
+      bbox_id: typeof bi.id === "number" ? bi.id : -1,
+      local_position: hasLocal ? copyVec3(bi.local_position as Vec3) : zeroVec3(),
+      local_position_valid: hasLocal,
+      local_theta: typeof bi.local_theta === "number" ? bi.local_theta : 0,
+      length:     typeof bi.length     === "number" ? bi.length     : 0,
+      width:      typeof bi.width      === "number" ? bi.width      : 0,
+      height:     typeof bi.height     === "number" ? bi.height     : 0,
+      type:       objType,
+      sub_type:   objSubType,
+      confidence: typeof bi.confidence === "number" ? bi.confidence : 0,
+      velocity: hasVel ? copyVec3(ao.tracking_info!.velocity as Vec3) : zeroVec3(),
+      velocity_valid: hasVel,
+    };
+    matchFound = true;
+    matchedIdx = i;
+    break;
   }
 
-  withinThreshold.sort((a, b) => a.distance_m - b.distance_m);
-  const matched = withinThreshold.length > 0 ? withinThreshold[0]! : emptyCandidate();
-
   return {
-    header: msg.header, target, threshold_m: thresholdM,
-    match_found: withinThreshold.length > 0,
-    match_count: withinThreshold.length,
-    detected_count: detected.length,
-    detected_with_position_count: detectedWithPosition,
-    matched, nearest,
-    candidates_within_threshold: withinThreshold,
+    header: msg.header,
+    track_id_input: wantTrackId,
+    match_found: matchFound,
+    augmented_object_count: augObjects.length,
+    matched_index: matchedIdx,
+    matched,
   };
 }
