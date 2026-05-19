@@ -6,53 +6,53 @@ FoxBox (Foxglove Studio ベース) 向けの User Scripts 集です。
 
 ### 1. `target_object.ts`
 
-**入力トピック**: `/t2/bev_detection/objects`  
+**入力トピック**: `/t2/object_augmentor/augmented_scene`
 **出力トピック**: `/studio_script/target_object`
 
-指定した世界座標に最も近い物体を毎フレーム探して情報を出力します。
-トラッカー状態を持たないため Seek/Scrub でも即時に結果が得られます。
+`augmented_objects` から `track_id` で指定した物体を毎フレーム探して情報を出力します。`track_id` はフレーム間で安定しているため、位置ベースのマッチングと比べて誤認識のリスクがありません。
 
 **Variables パネルで設定する変数:**
 
 | 変数名 | 型 | 説明 |
 |---|---|---|
-| `target_x` | number | ターゲットの世界座標 x |
-| `target_y` | number | ターゲットの世界座標 y |
-| `target_z` | number | ターゲットの世界座標 z |
-| `threshold_m` | number | マッチング閾値 [m]（省略時 1.0m） |
+| `track_id` | number | 追跡する物体の track_id（`bbox_info.id`）（必須） |
+| `target_type` | number | 物体タイプで絞り込み（省略可） |
+| `target_sub_type` | number | サブタイプで絞り込み（省略可） |
+| `velocity_max_mps` | number | 速度上限 [m/s]（停止車両検索時に設定。省略時フィルタなし） |
+
+**track_id の確認方法:**
+Raw Messages で `/t2/object_augmentor/augmented_scene` → `augmented_objects` を展開し、追跡したい物体の `bbox_info.id`（または `tracking_info.track_id`）を確認。
 
 **主な出力フィールド:**
 
 | フィールド | 説明 |
 |---|---|
-| `match_found` | 閾値内の物体が見つかれば true |
-| `matched.*` | 閾値内で最も近い物体の全情報 |
-| `nearest.*` | 閾値外でもとにかく最近傍の物体 |
+| `match_found` | track_id が見つかれば true |
+| `matched.track_id` | マッチした物体の track_id |
+| `matched.local_position` | 車両フレーム内位置 |
+| `matched.length / width / height` | 寸法 |
+| `matched.velocity` | 速度ベクトル（tracking_info から） |
+| `matched.velocity_norm` | 速度のノルム [m/s] |
+| `matched.type / sub_type` | 物体タイプ |
 
 ---
 
 ### 2. `lane_boundary_tracker.ts`
 
-**入力トピック**:
-- `/t2/object_augmentor/augmented_scene` — レーン境界線データ、ターゲットの同一フレーム位置
-- `/t2/bev_detection/objects` — ターゲット物体の世界座標検索
-
+**入力トピック**: `/t2/object_augmentor/augmented_scene`（単一トピック）
 **出力トピック**: `/studio_script/lane_boundary_tracker`
 
-指定した世界座標のターゲット物体から、レーン境界線（白線）までの距離を、直交座標系および SL 座標系（Frenet フレーム）で算出します。
+`track_id` で指定したターゲット物体から、レーン境界線（白線）までの距離を、直交座標系および SL 座標系（Frenet フレーム）で算出します。
 
-SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `predecessor_ids` を辿って**自車レーンのセグメントを ID ベースで自動結合**し、単一セグメントの長さ制限（≈86m）を超えて **100m 以上の距離**にも対応します。ID がないセグメントでは単一セグメントにフォールバックします。
+v15 で `/t2/bev_detection/objects` を廃止し、単一トピック化。ターゲットは `augmented_objects` から `track_id` で直接検索するため、**Seek / コマ送り時のターゲット消失問題が解消**されました。
 
-`sl_central_curve_source` フィールドで現在のソースが確認できます（`"chained_id"` / `"single_segment"`）。
+SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `predecessor_ids` を辿って**自車レーンのセグメントを ID ベースで自動結合**し、単一セグメントの長さ制限（≈86m）を超えて **100m 以上の距離**にも対応します。
 
 **Variables パネルで設定する変数:**
 
 | 変数名 | 型 | 説明 |
 |---|---|---|
-| `target_x` | number | ターゲットの世界座標 x（`target_object` と同じ値） |
-| `target_y` | number | 同 y |
-| `target_z` | number | 同 z |
-| `threshold_m` | number | マッチング閾値 [m]（省略時 1.0m） |
+| `track_id` | number | 追跡する物体の track_id（`target_object` と同じ値） |
 
 **セグメント自動選択ロジック（直交座標系の距離計算用）:**
 1. ターゲット取得済み → `central_curve` への最短距離で自動選択
@@ -60,16 +60,18 @@ SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `
 
 ---
 
-## 出力フィールド一覧
+## 出力フィールド一覧（lane_boundary_tracker）
 
 ### 直交座標系（Cartesian）
 
-自動選択された単一セグメントの curve を使用。参考値として残しています。
+結合済み boundary + 2D 距離で計算。SL とほぼ同値の参考値。
 
 | フィールド | 説明 |
 |---|---|
-| `distance_to_left_boundary_m` | ターゲット ↔ 左境界 curve 全体の最短距離 [m] |
-| `distance_to_right_boundary_m` | ターゲット ↔ 右境界 curve 全体の最短距離 [m] |
+| `distance_to_left_boundary_m` | ターゲット中心 ↔ 左境界の最短 2D 距離 [m] |
+| `distance_target_edge_to_left_boundary_m` | 上記 − `width/2`（車両端→白線距離）|
+| `distance_to_right_boundary_m` | ターゲット中心 ↔ 右境界の最短 2D 距離 [m] |
+| `distance_target_edge_to_right_boundary_m` | 上記 − `width/2` |
 | `nearest_point_on_left_curve` | left_boundary polyline 上の最短点（頂点間の補間点） |
 | `available_segments` | 全 segment の id と距離一覧（id 確認・選択用） |
 
@@ -84,8 +86,9 @@ SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `
 | `chained_segment_count` | ID ベース結合時に繋いだセグメント数 |
 | `central_curve_total_length_m` | 使用中 `central_curve` 全体の弧長 [m] |
 | `central_curve_point_count` | 使用中 `central_curve` の頂点数 |
-| `ego_closest_curve_index` | S=0 とした `central_curve` 頂点のインデックス |
+| `ego_closest_curve_index` | S=0 とした `central_curve` のセグメント番号 |
 | `target_s_m` | ターゲットの S 座標。S=0 は自車位置。**正=前方、負=後方** [m] |
+| `target_s_chord_m` | ego投影点〜target投影点の直線距離（S と比較検証用） |
 | `target_l_m` | ターゲットの L 座標（符号付き横距離）[m] |
 | `target_central_projection` | ターゲットを central_curve に投影した点の座標 |
 | `target_central_segment_index` | 投影先の polyline セグメント番号 |
@@ -96,7 +99,6 @@ SL 計算の `central_curve` は、`local_lane_segments` の `successor_ids` / `
 | `distance_target_to_right_boundary_sl_m` | `target_l − right_l` |
 | `distance_target_edge_to_right_boundary_sl_m` | 上記 − `width/2` |
 | `left_boundary_l_bracket_mode` | 補間区間種別（デバッグ用） |
-| `target_same_frame_match` | augmented_objects から同一フレーム位置を取得できたか |
 
 ---
 
@@ -119,14 +121,29 @@ SL 座標系は、道路の中心線（`central_curve`）を基準にした**曲
         (自車最近傍)
 ```
 
-- **S (Station / Longitudinal)**: 自車（車両フレーム原点）に最も近い `central_curve` 頂点を **S=0** とし、polyline に沿って測った**符号付き弧長** [m]。正=前方、負=後方。
+- **S (Station / Longitudinal)**: 自車（車両フレーム原点）に最も近い `central_curve` 上の**投影点**を **S=0** とし、polyline に沿って測った**符号付き弧長** [m]。正=前方、負=後方。
 - **L (Lateral)**: ターゲットの **central_curve 上の投影点**からターゲットまの**符号付き垂直距離** [m]
 
-> この S 原点規約は社内 Python 版 [rt3000/bev/sl_convert.py](https://github.com/t2-auto/perception-utilities/blob/main/rt3000/bev/sl_convert.py) と同一です。https://t2-auto.slack.com/archives/C043EM71GJW/p1776863535569949
->
-> `target_s_m ≈ 50` ならターゲットは道路沿いに約 50m 先にいます。
+> この S 原点規約は社内 Python 版 `vehicle_coord_to_sl` と同一です。`target_s_m ≈ 50` ならターゲットは道路沿いに約 50m 先にいます。
 
-### ステップ 0: 複数セグメントの ID ベース結合
+### ステップ 0: ターゲットの検索（v15〜 track_id 方式）
+
+`augmented_scene` の `augmented_objects` から `track_id`（`bbox_info.id` 等）で直接検索します。
+
+```
+Variables: track_id = 4
+augmented_objects[0].bbox_info.id = 7  → skip
+augmented_objects[1].bbox_info.id = 4  → match! → local_position, width を取得
+```
+
+v14 以前は `/t2/bev_detection/objects` の世界座標 (position) でマッチングしていましたが、以下の問題があったため track_id 方式に移行しました:
+- 類似物体（同じ type/size のトラック等）が同じ位置閾値内に存在すると誤認識
+- 2 トピック間のメッセージ到着順序により Seek 後にターゲットが消失
+- 座標フレーム不一致（bev_detection と augmented_scene のタイムスタンプずれ）
+
+track_id 方式ではこれらの問題がすべて解消されます。
+
+### ステップ 1: 複数セグメントの ID ベース結合
 
 `local_lane_segments` の各セグメントは `central_curve` が約 86m と限られています。100m 以上離れたターゲットの SL を計算するため、`successor_ids` / `predecessor_ids` を辿って**自車レーンのセグメントを自動結合**します。
 
@@ -152,13 +169,11 @@ seg_C ← seg_B ← seg_A ← [ego (+x固定)] → seg_D → seg_E
 
 > **ポイント**: ego segment の向きは**ターゲット位置に依存しない**（常に +x 方向）ため、ターゲットが前方でも後方でも S の符号が一貫します。
 
-> **補足**: `/t2/lane_creator/output` の `lane_center_curve` はレーン全体の高精度な polyline（1041 点）を提供しますが、3 番目の入力トピック追加による FoxBox の処理負荷が大きいため、v13 で採用を見送りました。コマ送り（Seek）時に状態がリセットされる制約もあり、ID ベース結合で実用上十分な精度が得られています。
-
-### ステップ 1: S 値の計算（自車基準の累積弧長）
+### ステップ 2: S 値の計算（自車基準の累積弧長）
 
 結合済みの `central_curve` の頂点配列 `[P₀, P₁, P₂, ..., Pₙ]` に対して S を計算します。
 
-#### 1-a. 標準累積弧長の計算
+#### 2-a. 標準累積弧長の計算
 
 まず `curve[0]` を起点にした標準累積弧長を求めます:
 
@@ -167,30 +182,27 @@ raw[0] = 0
 raw[i] = raw[i-1] + √((Pᵢ.x - Pᵢ₋₁.x)² + (Pᵢ.y - Pᵢ₋₁.y)²)
 ```
 
-#### 1-b. 自車最近傍点の探索
+#### 2-b. 自車最近傍投影点の探索
 
-車両フレーム原点 (0, 0) に最も近い `central_curve` の**頂点**を探索します:
-
-```
-egoClosestIdx = argmin_i  √(Pᵢ.x² + Pᵢ.y²)
-```
-
-#### 1-c. S 原点をシフト
-
-標準累積弧長から自車最近傍点の値を引くことで、S=0 を自車位置に設定します:
+車両フレーム原点 (0, 0) を `central_curve` の各セグメントに 2D 投影し、最も近い **polyline 上の点**の S を求めます（頂点間の補間点も含む）:
 
 ```
-cumS[i] = raw[i] − raw[egoClosestIdx]
+bestS = raw[i] + t × |Pᵢ₊₁ − Pᵢ|    (t は投影パラメータ)
+```
+
+#### 2-c. S 原点をシフト
+
+```
+cumS[i] = raw[i] − bestS
 ```
 
 ```
 (後方seg)           (ego seg)                    (前方seg)
-P₀ ───── P₁ ───── P₂(ego最近傍) ───── P₃ ───── P₄ ───── P₅
-                    ↓ S=0
--120m    -80m       0m               +40m      +80m     +150m   ← cumS
+P₀ ───── P₁ ───── ◇(ego投影, S=0) ───── P₃ ───── P₄
+-120m    -80m       0m               +40m      +80m     ← cumS
 ```
 
-#### 1-d. ターゲットの S を求める
+#### 2-d. ターゲットの S を求める
 
 1. ターゲットを各セグメント `Pᵢ → Pᵢ₊₁` に投影（2D 最近傍点探索）
 2. 最も近いセグメントを特定（セグメント番号 `i`、内分パラメータ `t ∈ [0, 1]`）
@@ -217,13 +229,13 @@ t の幾何学的意味:
 
 `S > 0` ならターゲットは自車より前方、`S < 0` なら後方です。
 
-### ステップ 2: L 値の計算（符号付き横距離）
+### ステップ 3: L 値の計算（符号付き横距離）
 
-ステップ 1 で求めた投影セグメント `Pᵢ → Pᵢ₊₁` 上の最近傍点を `Q` とします。
+ステップ 2 で求めた投影セグメント `Pᵢ → Pᵢ₊₁` 上の最近傍点を `Q` とします。
 
 **Q の求め方（内積による射影）:**
 
-ステップ 1-d で求めた内分パラメータ `t` を使い、線分 `Pᵢ → Pᵢ₊₁` 上の点を補間します:
+ステップ 2-d で求めた内分パラメータ `t` を使い、線分 `Pᵢ → Pᵢ₊₁` 上の点を補間します:
 
 ```
 Q = Pᵢ + t × (Pᵢ₊₁ − Pᵢ)
@@ -260,7 +272,7 @@ L < 0  ←  cross < 0（セグメント進行方向の右側）
 
 > **注意**: `central_curve` の方向は道路の走行方向と一致するとは限りません。逆方向の場合、L の正負が道路の左右と逆転します。そのため、距離の計算では `target_l − boundary_l` の**差分**で符号を相殺し、結果が `central_curve` の方向に依存しないようにしています。
 
-### ステップ 3: 白線の L 値を補間
+### ステップ 4: 白線の L 値を補間
 
 左右の白線（結合済みの `left_boundary` / `right_boundary`）の各頂点を同様に `central_curve` に投影し、`(S, L)` の配列を作ります。
 
@@ -292,7 +304,7 @@ L_boundary = 1.81 + 0.5 × (1.84 - 1.81) = 1.825
 | `after_end` | target の S が白線の最大 S より大きい（末尾の L 値で外挿） |
 | `single` | 白線が 1 点のみ |
 
-### ステップ 4: 車両端 ↔ 白線距離の算出
+### ステップ 5: 車両端 ↔ 白線距離の算出
 
 最終的な車両端から白線までの距離は:
 
@@ -326,17 +338,11 @@ distance_target_edge_to_right_boundary_sl_m = target_l  −  right_boundary_l  �
 |---|---|---|
 | **基準** | 車両フレームの y 軸 | `central_curve` への垂線 |
 | **道路形状への対応** | 曲がった道路では距離の意味が変わる | 道路に沿った距離なので直感的 |
-| **代表フィールド** | `distance_to_left_boundary_m` | `distance_target_edge_to_left_boundary_sl_m` |
-| **精度** | 単一セグメント内の最短距離 | polyline 投影 + 外積（道路に沿った距離） |
+| **代表フィールド** | `distance_target_edge_to_left_boundary_m` | `distance_target_edge_to_left_boundary_sl_m` |
+| **精度** | 結合済み boundary への 2D 最短距離 | polyline 投影 + 外積（道路に沿った距離） |
 | **推奨用途** | 参考値 | **停止車両 ↔ 白線の汎用的な距離計測** |
 | **central_curve のソース** | 単一セグメント | ID ベース結合（`successor_ids` / `predecessor_ids`）> 単一セグメント |
-| **S の原点** | ― | 自車最近傍点（S=0）。社内 Python 版と統一 |
-
-### 座標フレームについて（v7〜）
-
-ターゲットの位置は `/t2/bev_detection/objects` から世界座標で特定し、`raw_id` を保存します。距離・SL 計算には `/t2/object_augmentor/augmented_scene` の `augmented_objects` から同じ `raw_id` の `local_position` を取得し、`central_curve` と**同一の車両フレーム**内で計算します。
-
-これにより、2 つのトピックのタイムスタンプずれによる座標フレーム不一致の影響を低減しています。`target_same_frame_match = true` の場合、同一フレーム位置が使用されています。`false` の場合は `bev_detection` の `local_position`（別フレームの可能性あり）にフォールバックします。
+| **S の原点** | ― | 自車最近傍投影点（S=0）。社内 Python 版と統一 |
 
 ---
 
@@ -350,18 +356,17 @@ lane_boundary_tracker.target_s_m
 lane_boundary_tracker.target_l_m
 
 # 直交座標系（参考値）
-lane_boundary_tracker.distance_to_left_boundary_m
-lane_boundary_tracker.distance_to_right_boundary_m
+lane_boundary_tracker.distance_target_edge_to_left_boundary_m
+lane_boundary_tracker.distance_target_edge_to_right_boundary_m
 
 # 状態フラグ・デバッグ
-lane_boundary_tracker.target_object_found
+lane_boundary_tracker.target_found
 lane_boundary_tracker.segment_found
 lane_boundary_tracker.sl_valid
-lane_boundary_tracker.sl_central_curve_source   # "lane_creator" / "chained_id" / "single_segment"
+lane_boundary_tracker.sl_central_curve_source
 lane_boundary_tracker.chained_segment_count
 lane_boundary_tracker.central_curve_total_length_m
 lane_boundary_tracker.central_curve_point_count
-lane_boundary_tracker.target_same_frame_match
 ```
 
 ### 50m / 100m 後方からの白線距離計測
@@ -377,7 +382,32 @@ lane_boundary_tracker.target_same_frame_match
 
 Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_left_boundary_sl_m`** を設定すると、各距離での白線距離がプロットできます。
 
-> `target_s_m` は直線距離ではなく**道路に沿った弧長**です。カーブがある場合、直線距離より大きくなります。
+> `target_s_m` は直線距離ではなく**道路に沿った弧長**です。カーブがある場合、直線距離より大きくなります。弧長と直線距離の比較には `target_s_chord_m` を使用できます。
+
+---
+
+### 3. `high_memory_processes.ts`
+
+**入力トピック**: `/t2/resource_monitor/raw`
+**出力トピック**: `/studio_script/high_memory_processes`
+
+`process_info` から resident_memory が閾値以上のプロセスを抽出します。
+
+**Variables パネルで設定する変数:**
+
+| 変数名 | 型 | 説明 |
+|---|---|---|
+| `memory_threshold_mb` | number | メモリ閾値 [MB]（省略時 100MB） |
+
+**主な出力フィールド:**
+
+| フィールド | 説明 |
+|---|---|
+| `filtered_count` | 閾値以上のプロセス数 |
+| `filtered_processes[i].index` | `process_info` の元インデックス |
+| `filtered_processes[i].name` | プロセス名 |
+| `filtered_processes[i].pid` | PID |
+| `filtered_processes[i].resident_memory_mb` | メモリ使用量 [MB] |
 
 ---
 
@@ -397,5 +427,5 @@ Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_le
 
 - トークン等の認証情報をスクリプト内に記載しないでください
 - FoxBox の User Scripts エディタに貼り付けて使用します
-- `Output | undefined` は FoxBox が許可する唯一の union 型です（multi-input スクリプトで使用）
-- Seek backward するとモジュール変数がリセットされます。Seek forward は状態が保持されます
+- `target_object` と `lane_boundary_tracker` は同じ `track_id` を Variables で共有します
+- Seek backward するとモジュール変数がリセットされますが、v15 以降は単一トピック構成のためターゲット消失問題は発生しません
