@@ -43,8 +43,8 @@ type GlobalVariables = {
   target_width?: number;
   target_height?: number;
   size_threshold_m?: number;
-  target_type?: number;
-  target_sub_type?: number;
+  target_type?: number | string;
+  target_sub_type?: number | string;
 };
 
 // Variables が未設定のときに使うデフォルト (ここを編集して使ってもOK)
@@ -177,8 +177,8 @@ export default function script(
   const wantLength = typeof globalVars.target_length === "number" ? globalVars.target_length : -1;
   const wantWidth  = typeof globalVars.target_width  === "number" ? globalVars.target_width  : -1;
   const wantHeight = typeof globalVars.target_height === "number" ? globalVars.target_height : -1;
-  const wantType    = typeof globalVars.target_type     === "number" ? globalVars.target_type     : -1;
-  const wantSubType = typeof globalVars.target_sub_type === "number" ? globalVars.target_sub_type : -1;
+  const wantType    = globalVars.target_type    != null ? Number(globalVars.target_type)     : -1;
+  const wantSubType = globalVars.target_sub_type != null ? Number(globalVars.target_sub_type) : -1;
 
   const msg = event.message as unknown as {
     header: Header;
