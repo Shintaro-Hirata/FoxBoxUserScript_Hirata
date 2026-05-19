@@ -547,12 +547,14 @@ export default function script(
       // 参照座標を保存 (bev_detection でのマッチング用)
       storedRefLocalPos = copyVec3(bi.local_position as Vec3);
       storedRefFound = true;
-      // bev_detection の local_position / width を優先、なければ augmented_scene を使用
-      effectiveLocalPos = storedBevFound ? copyVec3(storedBevLocalPos) : copyVec3(bi.local_position as Vec3);
-      effectiveWidth = storedBevFound ? storedBevWidth
-        : typeof bi.width === "number" ? bi.width : 0;
       targetTrackId = tid;
-      targetFound = true;
+      // bev_detection データがある場合のみ距離計算を有効化
+      // augmented_scene の position/width は距離計算に使わない (width=2.5 バグ回避)
+      if (storedBevFound) {
+        effectiveLocalPos = copyVec3(storedBevLocalPos);
+        effectiveWidth = storedBevWidth;
+        targetFound = true;
+      }
       break;
     }
   }

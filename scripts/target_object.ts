@@ -198,8 +198,7 @@ export default function script(
       local_position_valid: hasLocal,
       local_theta: typeof bi.local_theta === "number" ? bi.local_theta : 0,
       length:     typeof bi.length     === "number" ? bi.length     : 0,
-      width:      storedBevFound ? storedBevWidth
-                    : typeof bi.width === "number" ? bi.width : 0,
+      width:      storedBevFound ? storedBevWidth : 0,
       height:     typeof bi.height     === "number" ? bi.height     : 0,
       type:       objType,
       sub_type:   objSubType,
