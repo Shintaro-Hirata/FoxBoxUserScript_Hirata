@@ -122,6 +122,11 @@ type Output = {
   right_boundary_l_bracket_mode: string;
   distance_target_to_right_boundary_sl_m: number;
   distance_target_edge_to_right_boundary_sl_m: number;
+  // 全セグメント横断で最も近い白線
+  nearest_boundary_distance_m: number;
+  nearest_boundary_edge_distance_m: number;
+  nearest_boundary_segment_id: string;
+  nearest_boundary_side: string;
 };
 
 // --- ユーティリティ ---------------------------------------------------------
@@ -627,6 +632,25 @@ export default function script(
     }
   }
 
+  // 全セグメントの全白線からターゲットに最も近い白線を探索 (2D)
+  let nearestBdDist = Number.POSITIVE_INFINITY;
+  let nearestBdSegId = "";
+  let nearestBdSide = "";
+  if (targetFound) {
+    for (const s of segments) {
+      if (s.left_boundary.curve.length > 0) {
+        const r = ptCurve2D(effectiveLocalPos, s.left_boundary.curve);
+        if (r.dist < nearestBdDist) { nearestBdDist = r.dist; nearestBdSegId = s.id; nearestBdSide = "left"; }
+      }
+      if (s.right_boundary.curve.length > 0) {
+        const r = ptCurve2D(effectiveLocalPos, s.right_boundary.curve);
+        if (r.dist < nearestBdDist) { nearestBdDist = r.dist; nearestBdSegId = s.id; nearestBdSide = "right"; }
+      }
+    }
+  }
+  const nearestBdEdgeDist = nearestBdDist < Number.POSITIVE_INFINITY
+    ? nearestBdDist - effectiveWidth * 0.5 : 0;
+
   return {
     header: msg.header,
     track_id_input: wantTrackId,
@@ -670,5 +694,9 @@ export default function script(
     right_boundary_l_bracket_mode: rightBracket,
     distance_target_to_right_boundary_sl_m: distToRightSL,
     distance_target_edge_to_right_boundary_sl_m: distEdgeToRightSL,
+    nearest_boundary_distance_m: nearestBdDist < Number.POSITIVE_INFINITY ? nearestBdDist : 0,
+    nearest_boundary_edge_distance_m: nearestBdEdgeDist,
+    nearest_boundary_segment_id: nearestBdSegId,
+    nearest_boundary_side: nearestBdSide,
   };
 }
