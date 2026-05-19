@@ -39,6 +39,7 @@ type Header = { seq: number; stamp: Stamp; frame_id: string };
 
 type GlobalVariables = {
   track_id?: number | string;
+  threshold_m?: number | string;
 };
 
 // --- 入力型 (union OK) ------------------------------------------------------
@@ -499,6 +500,7 @@ export default function script(
   // bev_detection 受信: 参照座標に最も近い物体の local_position / width を保存
   // =========================================================================
   if (event.topic === "/t2/bev_detection/objects") {
+    const threshM = globalVars.threshold_m != null ? Number(globalVars.threshold_m) : 1.0;
     if (storedRefFound) {
       const bmsg = event.message as unknown as {
         detected_objects: {
@@ -513,9 +515,9 @@ export default function script(
           bestD = d;
           storedBevLocalPos = copyVec3(o.local_position as Vec3);
           storedBevWidth = typeof o.width === "number" ? o.width : 0;
-          storedBevFound = true;
         }
       }
+      storedBevFound = bestD <= threshM;
     }
     // return undefined せず、storedScene データがあれば下で出力
     if (!storedSceneReceived) return undefined;
