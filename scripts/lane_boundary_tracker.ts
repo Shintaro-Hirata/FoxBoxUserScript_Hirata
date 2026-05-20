@@ -97,6 +97,7 @@ type Output = {
   bev_match_distance_m: number;
   target_local_position: Vec3;
   target_width: number;
+  target_width_source: string;
   distance_computed: boolean;
   distance_to_left_boundary_m: number;
   distance_target_edge_to_left_boundary_m: number;
@@ -594,18 +595,43 @@ export default function script(
   // 出力計算: どちらのトピック到着でも実行
   // =========================================================================
   const segments = storedSceneSegments;
-  const augObjects = storedSceneAugObjects;
 
-  // ターゲット: bev_detection データのみ使用 (augmented_scene の width=2.5 バグ回避)
+  // ターゲット検索: augmented_scene で常に計算 (コマ送り対応)
+  // width のみ bev_detection が利用可能ならそちらを優先
   const wantTrackId = globalVars.track_id != null ? Number(globalVars.track_id) : -1;
   const hasWorldTarget =
     typeof globalVars.target_x === "number" &&
     typeof globalVars.target_y === "number" &&
     typeof globalVars.target_z === "number";
-  const targetFound = storedBevFound && storedRefFound && (wantTrackId >= 0 || hasWorldTarget);
-  const effectiveLocalPos = storedBevFound ? copyVec3(storedBevLocalPos) : zeroVec3();
-  const effectiveWidth = storedBevFound ? storedBevWidth : 0;
+
+  let targetFound = false;
+  let effectiveLocalPos = zeroVec3();
+  let effectiveWidth = 0;
+  let widthSource = "none";
   const targetTrackId = storedTrackId;
+
+  if (wantTrackId >= 0) {
+    // (A) track_id 方式: augmented_scene から local_position を取得
+    for (const ao of storedSceneAugObjects) {
+      const bi = ao.bbox_info;
+      const tid = typeof ao.track_id === "number" ? ao.track_id
+        : (ao.tracking_info && typeof ao.tracking_info.track_id === "number") ? ao.tracking_info.track_id
+        : typeof bi.id === "number" ? bi.id : -1;
+      if (tid !== wantTrackId) continue;
+      if (!isValidVec3(bi.local_position)) continue;
+      effectiveLocalPos = storedBevFound ? copyVec3(storedBevLocalPos) : copyVec3(bi.local_position as Vec3);
+      effectiveWidth = storedBevFound ? storedBevWidth : (typeof bi.width === "number" ? bi.width : 0);
+      widthSource = storedBevFound ? "bev" : "augmented";
+      targetFound = true;
+      break;
+    }
+  } else if (hasWorldTarget && storedBevFound) {
+    // (B) world 座標方式: bev_detection データが必要
+    effectiveLocalPos = copyVec3(storedBevLocalPos);
+    effectiveWidth = storedBevWidth;
+    widthSource = "bev";
+    targetFound = true;
+  }
 
   // available_segments
   const availableSegments: SegmentSummary[] = [];
@@ -763,6 +789,7 @@ export default function script(
     bev_match_distance_m: storedBevMatchDist,
     target_local_position: copyVec3(effectiveLocalPos),
     target_width: effectiveWidth,
+    target_width_source: widthSource,
     distance_computed: canCompute,
     distance_to_left_boundary_m: distLeft,
     distance_target_edge_to_left_boundary_m: distEdgeLeft,
