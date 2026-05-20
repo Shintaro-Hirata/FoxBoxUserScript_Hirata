@@ -620,8 +620,8 @@ export default function script(
       if (tid !== wantTrackId) continue;
       if (!isValidVec3(bi.local_position)) continue;
       effectiveLocalPos = storedBevFound ? copyVec3(storedBevLocalPos) : copyVec3(bi.local_position as Vec3);
-      effectiveWidth = storedBevFound ? storedBevWidth : (typeof bi.width === "number" ? bi.width : 0);
-      widthSource = storedBevFound ? "bev" : "augmented";
+      effectiveWidth = storedBevFound ? storedBevWidth : 0;
+      widthSource = storedBevFound ? "bev" : "none";
       targetFound = true;
       break;
     }
