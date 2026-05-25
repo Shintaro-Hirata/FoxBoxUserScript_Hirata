@@ -43,6 +43,7 @@ type GlobalVariables = {
   target_y?: number;
   target_z?: number;
   threshold_m?: number | string;
+  ma_window?: number | string;
 };
 
 // --- 入力型 (union OK) ------------------------------------------------------
@@ -132,6 +133,13 @@ type Output = {
   nearest_boundary_distance_m: number;
   nearest_boundary_edge_distance_m: number;
   nearest_boundary_segment_id: string;
+  // 移動平均
+  ma_window: number;
+  target_s_ma: number;
+  target_l_ma: number;
+  distance_target_edge_to_left_boundary_sl_ma: number;
+  distance_target_edge_to_right_boundary_sl_ma: number;
+  nearest_boundary_edge_distance_ma: number;
   nearest_boundary_side: string;
 };
 
@@ -472,6 +480,25 @@ function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
   return { valid: true, l: lArr[last]!, bracketMode: "fallback" };
 }
 
+// --- 移動平均バッファ ---------------------------------------------------------
+type MaSample = {
+  s: number; l: number;
+  edgeLeft: number; edgeRight: number; nearestEdge: number;
+};
+const maBuffer: MaSample[] = [];
+
+function pushMa(sample: MaSample, maxLen: number): void {
+  maBuffer.push(sample);
+  while (maBuffer.length > maxLen) maBuffer.shift();
+}
+
+function avgMa(field: keyof MaSample): number {
+  if (maBuffer.length === 0) return 0;
+  let sum = 0;
+  for (const s of maBuffer) sum += s[field];
+  return sum / maBuffer.length;
+}
+
 // --- モジュール変数 -----------------------------------------------------------
 let storedRefLocalPos: Vec3 = { x: 0, y: 0, z: 0 };
 let storedRefFound = false;
@@ -774,6 +801,16 @@ export default function script(
   const nearestBdEdgeDist = nearestBdDist < Number.POSITIVE_INFINITY
     ? nearestBdDist - effectiveWidth * 0.5 : 0;
 
+  // 移動平均
+  const maWindow = globalVars.ma_window != null ? Number(globalVars.ma_window) : 11;
+  if (targetFound) {
+    pushMa({
+      s: targetS, l: targetL,
+      edgeLeft: distEdgeToLeftSL, edgeRight: distEdgeToRightSL,
+      nearestEdge: nearestBdEdgeDist,
+    }, maWindow);
+  }
+
   return {
     header: storedSceneHeader,
     track_id_input: wantTrackId,
@@ -823,5 +860,11 @@ export default function script(
     nearest_boundary_edge_distance_m: nearestBdEdgeDist,
     nearest_boundary_segment_id: nearestBdSegId,
     nearest_boundary_side: nearestBdSide,
+    ma_window: maWindow,
+    target_s_ma: avgMa("s"),
+    target_l_ma: avgMa("l"),
+    distance_target_edge_to_left_boundary_sl_ma: avgMa("edgeLeft"),
+    distance_target_edge_to_right_boundary_sl_ma: avgMa("edgeRight"),
+    nearest_boundary_edge_distance_ma: avgMa("nearestEdge"),
   };
 }
