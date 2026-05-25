@@ -480,23 +480,28 @@ function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
   return { valid: true, l: lArr[last]!, bracketMode: "fallback" };
 }
 
-// --- 移動平均バッファ ---------------------------------------------------------
+// --- 移動平均バッファ (前後 N 点の centered average) -------------------------
 type MaSample = {
   s: number; l: number;
   edgeLeft: number; edgeRight: number; nearestEdge: number;
 };
 const maBuffer: MaSample[] = [];
 
-function pushMa(sample: MaSample, maxLen: number): void {
+function clearMa(): void { maBuffer.length = 0; }
+
+function pushMa(sample: MaSample): void {
   maBuffer.push(sample);
-  while (maBuffer.length > maxLen) maBuffer.shift();
 }
 
-function avgMa(field: keyof MaSample): number {
-  if (maBuffer.length === 0) return 0;
+// centered average: 中心は half 個前のサンプル。前後 half 個ずつ = 計 window 個。
+// バッファに window 個未満の場合は 0 を返す。
+function centeredAvg(field: keyof MaSample, window: number): number {
+  if (maBuffer.length < window) return 0;
   let sum = 0;
-  for (const s of maBuffer) sum += s[field];
-  return sum / maBuffer.length;
+  for (let i = maBuffer.length - window; i < maBuffer.length; i++) {
+    sum += maBuffer[i]![field];
+  }
+  return sum / window;
 }
 
 // --- モジュール変数 -----------------------------------------------------------
@@ -801,14 +806,18 @@ export default function script(
   const nearestBdEdgeDist = nearestBdDist < Number.POSITIVE_INFINITY
     ? nearestBdDist - effectiveWidth * 0.5 : 0;
 
-  // 移動平均
+  // 移動平均 (centered: 前後 half 点ずつ = 計 maWindow 点)
   const maWindow = globalVars.ma_window != null ? Number(globalVars.ma_window) : 11;
   if (targetFound) {
     pushMa({
       s: targetS, l: targetL,
       edgeLeft: distEdgeToLeftSL, edgeRight: distEdgeToRightSL,
       nearestEdge: nearestBdEdgeDist,
-    }, maWindow);
+    });
+    // バッファ上限: window の 2 倍程度で十分
+    while (maBuffer.length > maWindow * 2) maBuffer.shift();
+  } else {
+    clearMa();
   }
 
   return {
@@ -861,10 +870,10 @@ export default function script(
     nearest_boundary_segment_id: nearestBdSegId,
     nearest_boundary_side: nearestBdSide,
     ma_window: maWindow,
-    target_s_ma: avgMa("s"),
-    target_l_ma: avgMa("l"),
-    distance_target_edge_to_left_boundary_sl_ma: avgMa("edgeLeft"),
-    distance_target_edge_to_right_boundary_sl_ma: avgMa("edgeRight"),
-    nearest_boundary_edge_distance_ma: avgMa("nearestEdge"),
+    target_s_ma: centeredAvg("s", maWindow),
+    target_l_ma: centeredAvg("l", maWindow),
+    distance_target_edge_to_left_boundary_sl_ma: centeredAvg("edgeLeft", maWindow),
+    distance_target_edge_to_right_boundary_sl_ma: centeredAvg("edgeRight", maWindow),
+    nearest_boundary_edge_distance_ma: centeredAvg("nearestEdge", maWindow),
   };
 }
