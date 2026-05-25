@@ -43,7 +43,7 @@ type GlobalVariables = {
   target_y?: number;
   target_z?: number;
   threshold_m?: number | string;
-  ma_window?: number | string;
+  ema_alpha?: number | string;
 };
 
 // --- 入力型 (union OK) ------------------------------------------------------
@@ -133,13 +133,13 @@ type Output = {
   nearest_boundary_distance_m: number;
   nearest_boundary_edge_distance_m: number;
   nearest_boundary_segment_id: string;
-  // 移動平均
-  ma_window: number;
-  target_s_ma: number;
-  target_l_ma: number;
-  distance_target_edge_to_left_boundary_sl_ma: number;
-  distance_target_edge_to_right_boundary_sl_ma: number;
-  nearest_boundary_edge_distance_ma: number;
+  // EMA (指数移動平均)
+  ema_alpha: number;
+  target_s_ema: number;
+  target_l_ema: number;
+  distance_target_edge_to_left_boundary_sl_ema: number;
+  distance_target_edge_to_right_boundary_sl_ema: number;
+  nearest_boundary_edge_distance_ema: number;
   nearest_boundary_side: string;
 };
 
@@ -480,28 +480,25 @@ function interpolateLAtS(targetS: number, sArr: number[], lArr: number[]): {
   return { valid: true, l: lArr[last]!, bracketMode: "fallback" };
 }
 
-// --- 移動平均バッファ (前後 N 点の centered average) -------------------------
-type MaSample = {
-  s: number; l: number;
-  edgeLeft: number; edgeRight: number; nearestEdge: number;
-};
-const maBuffer: MaSample[] = [];
+// --- EMA (指数移動平均) -------------------------------------------------------
+type EmaState = { s: number; l: number; edgeLeft: number; edgeRight: number; nearestEdge: number };
+let ema: EmaState = { s: 0, l: 0, edgeLeft: 0, edgeRight: 0, nearestEdge: 0 };
+let emaInitialized = false;
 
-function clearMa(): void { maBuffer.length = 0; }
+function resetEma(): void { ema = { s: 0, l: 0, edgeLeft: 0, edgeRight: 0, nearestEdge: 0 }; emaInitialized = false; }
 
-function pushMa(sample: MaSample): void {
-  maBuffer.push(sample);
-}
-
-// centered average: 中心は half 個前のサンプル。前後 half 個ずつ = 計 window 個。
-// バッファに window 個未満の場合は 0 を返す。
-function centeredAvg(field: keyof MaSample, window: number): number {
-  if (maBuffer.length < window) return 0;
-  let sum = 0;
-  for (let i = maBuffer.length - window; i < maBuffer.length; i++) {
-    sum += maBuffer[i]![field];
+function updateEma(sample: EmaState, alpha: number): void {
+  if (!emaInitialized) {
+    ema = { ...sample };
+    emaInitialized = true;
+    return;
   }
-  return sum / window;
+  const a = alpha; const b = 1 - alpha;
+  ema.s = a * sample.s + b * ema.s;
+  ema.l = a * sample.l + b * ema.l;
+  ema.edgeLeft = a * sample.edgeLeft + b * ema.edgeLeft;
+  ema.edgeRight = a * sample.edgeRight + b * ema.edgeRight;
+  ema.nearestEdge = a * sample.nearestEdge + b * ema.nearestEdge;
 }
 
 // --- モジュール変数 -----------------------------------------------------------
@@ -806,18 +803,16 @@ export default function script(
   const nearestBdEdgeDist = nearestBdDist < Number.POSITIVE_INFINITY
     ? nearestBdDist - effectiveWidth * 0.5 : 0;
 
-  // 移動平均 (centered: 前後 half 点ずつ = 計 maWindow 点)
-  const maWindow = globalVars.ma_window != null ? Number(globalVars.ma_window) : 11;
+  // EMA (指数移動平均): 遅延ほぼゼロでノイズ除去
+  const emaAlpha = globalVars.ema_alpha != null ? Number(globalVars.ema_alpha) : 0.3;
   if (targetFound) {
-    pushMa({
+    updateEma({
       s: targetS, l: targetL,
       edgeLeft: distEdgeToLeftSL, edgeRight: distEdgeToRightSL,
       nearestEdge: nearestBdEdgeDist,
-    });
-    // バッファ上限: window の 2 倍程度で十分
-    while (maBuffer.length > maWindow * 2) maBuffer.shift();
+    }, emaAlpha);
   } else {
-    clearMa();
+    resetEma();
   }
 
   return {
@@ -869,11 +864,11 @@ export default function script(
     nearest_boundary_edge_distance_m: nearestBdEdgeDist,
     nearest_boundary_segment_id: nearestBdSegId,
     nearest_boundary_side: nearestBdSide,
-    ma_window: maWindow,
-    target_s_ma: centeredAvg("s", maWindow),
-    target_l_ma: centeredAvg("l", maWindow),
-    distance_target_edge_to_left_boundary_sl_ma: centeredAvg("edgeLeft", maWindow),
-    distance_target_edge_to_right_boundary_sl_ma: centeredAvg("edgeRight", maWindow),
-    nearest_boundary_edge_distance_ma: centeredAvg("nearestEdge", maWindow),
+    ema_alpha: emaAlpha,
+    target_s_ema: ema.s,
+    target_l_ema: ema.l,
+    distance_target_edge_to_left_boundary_sl_ema: ema.edgeLeft,
+    distance_target_edge_to_right_boundary_sl_ema: ema.edgeRight,
+    nearest_boundary_edge_distance_ema: ema.nearestEdge,
   };
 }
