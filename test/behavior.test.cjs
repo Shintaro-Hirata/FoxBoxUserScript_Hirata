@@ -122,10 +122,10 @@ console.log("--- TEST 5: traversal measured time A->B->C ---");
   const b = last.targets.find((x) => x.id === "B");
   const c = last.targets.find((x) => x.id === "C");
   ok(a.measured_state === "completed", "A completed");
-  approx(a.measured_time_s, 3.1, 0.05, "A measured ~3.1s");
-  approx(a.measured_avg_speed_kph, (30 / 3.1) * 3.6, 0.5, "A avg speed");
+  approx(a.measured_time_s, 3.0, 0.12, "A measured ~3.0s (present span)");
+  approx(a.measured_avg_speed_kph, (30 / a.measured_time_s) * 3.6, 1e-6, "A avg speed = len/measured");
   ok(b.measured_state === "completed", "B completed");
-  approx(b.measured_time_s, 4.0, 0.05, "B measured ~4.0s");
+  approx(b.measured_time_s, 3.9, 0.12, "B measured ~3.9s (present span)");
   ok(c.measured_state === "in_progress", "C in_progress");
   const c40 = c.est_times_at_assumed.find((e) => e.speed_kph === 40);
   approx(c40.time_s, 50 / (40 / 3.6), 1e-6, "C est@40kph");
@@ -223,6 +223,62 @@ console.log("--- TEST 9: speed_margin_profile ---");
   ok(o.lookahead[0].id === "Q", "lookahead Q");
   approx(o.lookahead[0].speed_limit_kph, 40, 0.1, "Q 40kph");
   ok(o.lookahead[0].context_name === "EXITING_ETC", "Q EXITING_ETC");
+}
+
+console.log("--- TEST 10: bigint ego_lane_segment_indices (uint64) accepted ---");
+{
+  // Foxglove delivers uint64 indices as bigint. Scripts must coerce, not skip.
+  const segs = [seg("A", straight(-30, -10, 3), 20, 8.33, false), seg("B", straight(-10, 40, 6), 50, 8.33, false)];
+  const ev = {
+    topic: "/t2/object_augmentor/augmented_scene", receiveTime: T(0),
+    message: { local_map_info: { local_lane_segments: segs, ego_lane_segment_indices: [BigInt(1)] } },
+  };
+  const o = ego(ev, {});
+  ok(o.source === "ego_indices", "bigint index accepted (source=ego_indices, not fallback)");
+  ok(o.primary_segment_id === "B", "bigint index resolves to B");
+}
+
+console.log("--- TEST 11: traversal flicker debounce + re-entry re-measure ---");
+{
+  const F = seg("F11", straight(0, 40, 5), 40, 8.33, false);
+  const G = seg("G11", straight(0, 40, 5), 40, 8.33, false);
+  const vars = { target_segment_ids: "F11" };
+  const fr = (t, idxs) => ({
+    topic: "/t2/object_augmentor/augmented_scene", receiveTime: T(t),
+    message: { local_map_info: { local_lane_segments: [F, G], ego_lane_segment_indices: idxs } },
+  });
+  let last;
+  // On F for 1000.0..1002.0 with a single-frame dropout at i=10 (t=1001.0)
+  for (let i = 0; i <= 20; i++) {
+    const idxs = i === 10 ? [] : [BigInt(0)];
+    last = trav(fr(1000.0 + i * 0.1, idxs), vars);
+  }
+  ok(last.targets[0].measured_state === "in_progress", "flicker: F still in_progress (not truncated)");
+  approx(last.targets[0].measured_time_s, 2.0, 0.15, "flicker: measured spans full ~2.0s");
+  // Leave F for good (>0.5s) -> completes with the full span
+  for (let i = 21; i <= 30; i++) { last = trav(fr(1000.0 + i * 0.1, [BigInt(1)]), vars); }
+  ok(last.targets[0].measured_state === "completed", "F completed after real exit");
+  approx(last.targets[0].measured_time_s, 2.0, 0.15, "F measured ~2.0s (present span)");
+  // Genuine re-entry after completion -> re-measures from a new enter
+  for (let i = 31; i <= 35; i++) { last = trav(fr(1000.0 + i * 0.1, [BigInt(0)]), vars); }
+  ok(last.targets[0].measured_state === "in_progress", "F re-entry -> in_progress again");
+  ok(last.targets[0].measured_time_s < 1.0, "F re-entry measured restarts small");
+}
+
+console.log("--- TEST 12: follower uses ego_lane_segment_indices (bigint) as SL anchor ---");
+{
+  const E = { id: "E12", central_curve: straight(-50, 50, 11), length: 100, successor_ids: [], predecessor_ids: [] };
+  const obj = {
+    bbox_info: { id: 77, local_position: { x: -15, y: 0, z: 0 }, width: 1.8, length: 4.5, type: 1 },
+    tracking_info: { local_velocity: { x: 7, y: 0, z: 0 }, local_relative_velocity: { x: 0.3, y: 0, z: 0 }, is_stationary: false },
+  };
+  const ev = {
+    topic: "/t2/object_augmentor/augmented_scene", receiveTime: T(2000),
+    message: { local_map_info: { local_lane_segments: [E], ego_lane_segment_indices: [BigInt(0)] }, augmented_objects: [obj] },
+  };
+  const o = foll(ev, {});
+  ok(o.follower_found && o.follower_track_id === 77, "follower found via bigint ego index");
+  approx(o.follower_gap_s_m, 15, 0.5, "follower gap 15");
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

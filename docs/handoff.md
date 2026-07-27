@@ -27,19 +27,42 @@ Jira **VT26-1124「ETC 通過前後の周囲状況解析」**向けに、以下�
 
 整備物:
 - **検証ハーネス** `test/`（`scripts/types.ts` スタブ + `tsconfig.json` + `test/behavior.test.cjs`）。
-  `bash test/run.sh` で strict tsc（全 8 スクリプト）+ 合成テスト（69 assertion）が緑。
+  `bash test/run.sh` で strict tsc（全 8 スクリプト）+ 合成テスト（79 assertion）が緑。
 - **ドキュメント** `CLAUDE.md`（自動読込）+ `docs/data_model.md` / `design.md` /
   `foxbox_userscript_conventions.md` / 本ファイル。
 
 ## リファクタ／バグ確認の結果
 
-- 全スクリプト strict `tsc`（`noUnusedLocals` 等）+ 合成テストを通過。機能バグは検出されていない。
-- `lane_boundary_tracker.ts` の**未使用コードを削除**: `minDist`, `ptSeg`, `ptCurve`,
-  `findByEndpoint`, `lateralOk`, 定数 `CONNECT_THRESH`/`LATERAL_THRESH`, 変数
-  `egoRoadId`/`hasConnectivity`。いずれも「endpoint 近接フォールバック廃止」の残骸で、
-  tsc が未使用と保証しており挙動不変（README 記載の ID ベース結合方針と一致）。
-- 方針決定（ユーザー承認済み）: **各スクリプトは自己完結を維持**（個別コピペ運用のため共有 lib 化はしない）。
-  ヘルパの重複は意図的。詳細は `docs/foxbox_userscript_conventions.md`。
+独立レビュー（IDL と突き合わせ）を実施し、下記を修正した。修正後は strict `tsc`（全スクリプト）＋
+合成テスト（**79 assertion**）が緑。
+
+**バグ修正:**
+- **uint64 index の bigint 問題（重大）**: `ego_lane_segment_indices` は `sequence<uint64>` で、
+  Foxglove では `bigint` で届く。数値化ヘルパが `number` のみ受け付けて全 index を破棄し、
+  `ego_lane_segments`／`speed_margin_profile` はフォールバックに落ち、`lane_segment_traversal_time` は
+  実測機能が無言で停止していた。`num()` を bigint 対応にして修正（合成テストが数値 index しか
+  使っておらず見逃していた。bigint テストを追加）。
+- **通過時間の瞬断耐性**: `lane_segment_traversal_time` の退出判定を `EXIT_DEBOUNCE_S` でデバウンスし、
+  1〜数フレームの index 欠落で measured 時間が途中打ち切りされないよう修正。退出確定後の再進入は
+  新しい通過として再計測。
+- **follower の自車レーン特定**: `follower_gap_tracker` を `ego_lane_segment_indices` 起点に変更
+  （従来は最近傍頂点のみで、車線変更中に隣接レーンを掴む恐れ）。無い場合は最近傍頂点にフォールバック。
+
+**クリーンアップ:**
+- `lane_boundary_tracker.ts` の未使用コード削除（`minDist`, `ptSeg`, `ptCurve`, `findByEndpoint`,
+  `lateralOk`, `CONNECT_THRESH`/`LATERAL_THRESH`, `egoRoadId`/`hasConnectivity`。endpoint 近接
+  フォールバック廃止の残骸。tsc が未使用と保証、挙動不変）。
+- 未使用の入力型フィールド除去（follower の `velocity`/`track_id`、ego_lane の boundary 型、
+  lateral_g の `linear_acceleration`）、コメント齟齬の修正、`speed_margin_profile` の先読みを
+  `is_target_lane`/`is_route` 優先に変更。
+
+**既知の注意（コード欠陥ではない）:**
+- 常に空になり得る出力配列（`targets`/`recent_traversals`/`behind_objects`/`related_segments`）は、
+  最初の非空メッセージまで Foxglove がネスト要素のスキーマを推論できないことがある
+  （`docs/foxbox_userscript_conventions.md` §12）。
+
+**方針（ユーザー承認済み）:** 各スクリプトは自己完結を維持（個別コピペ運用のため共有 lib 化はしない）。
+ヘルパの重複は意図的。詳細は `docs/foxbox_userscript_conventions.md`。
 
 ## 新規セッションが最初にやること
 

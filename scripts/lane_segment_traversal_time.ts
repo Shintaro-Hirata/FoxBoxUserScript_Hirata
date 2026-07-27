@@ -125,13 +125,21 @@ const RADIUS_SENTINEL_M = 99999;   // 直線相当 (曲率 ~ 0) の半径表示�
 const VMAX_CAP_KPH = 200;          // 横G上限速度の表示上限 (カーブが緩い区間用)
 const RECENT_CAP = 40;             // recent_traversals の保持上限
 const TRACK_CAP = 600;             // tracks Map の保持上限 (超過時に古い完了分を整理)
+const EXIT_DEBOUNCE_S = 0.5;       // この時間以上 ego セグメントから外れて初めて退出確定 (瞬断を無視)
 
 // --- ユーティリティ ---------------------------------------------------------
 function isNum(v: unknown): v is number {
   return typeof v === "number" && isFinite(v);
 }
 function num(v: unknown, dflt: number): number {
-  return isNum(v) ? v : dflt;
+  if (isNum(v)) {
+    return v;
+  }
+  // ROS2 の uint64/int64 (例: ego_lane_segment_indices) は Foxglove では bigint で届く。
+  if (typeof v === "bigint") {
+    return Number(v);
+  }
+  return dflt;
 }
 function timeToSec(t: { sec?: number; nsec?: number } | undefined): number {
   if (t == null) {
@@ -395,37 +403,48 @@ export default function script(
     t.minRadiusM = minCurveRadius(curve);
   });
 
-  // 実測: 進入の検出 (現フレームで自車セグメントになっている id)
+  // 実測: 進入 / 継続 / 再進入の検出
   for (const id of egoIds) {
     const t = getOrCreate(id);
     if (!t.everEgo) {
+      // 初回進入
       t.everEgo = true;
       t.enterTime = nowSec;
       t.completed = false;
+      t.exitTime = 0;
+    } else if (t.completed) {
+      // 退出確定後の再進入 → 新しい通過として再計測
+      t.enterTime = nowSec;
+      t.completed = false;
+      t.exitTime = 0;
     }
+    // (everEgo かつ未完了はそのまま継続。enterTime は保持)
     t.lastInTime = nowSec;
     t.presentNow = true;
   }
 
-  // 実測: 退出の検出 (前フレームまで自車セグメントだったが今はいない id)
+  // 実測: 退出の確定
+  // EXIT_DEBOUNCE_S 以上 ego セグメントから外れて初めて退出とみなす。
+  // 1〜数フレームの瞬断では確定せず、再出現すれば継続として扱う (measured 時間の途中打ち切りを防ぐ)。
   tracks.forEach((t, id) => {
-    if (t.presentNow && !egoIdSet.has(id)) {
-      t.presentNow = false;
-      if (!t.completed) {
-        t.exitTime = nowSec;
-        t.completed = true;
-        const dur = t.exitTime - t.enterTime;
-        const avg = dur > 1e-6 ? t.lengthSl / dur : 0;
-        recentTraversals.unshift({
-          id,
-          time_s: dur,
-          length_sl_m: t.lengthSl,
-          avg_speed_kph: avg * MPS_TO_KPH,
-          speed_limit_kph: t.speedLimitMps * MPS_TO_KPH,
-        });
-        if (recentTraversals.length > RECENT_CAP) {
-          recentTraversals = recentTraversals.slice(0, RECENT_CAP);
-        }
+    if (egoIdSet.has(id)) {
+      return;
+    }
+    t.presentNow = false;
+    if (t.everEgo && !t.completed && (nowSec - t.lastInTime) > EXIT_DEBOUNCE_S) {
+      t.completed = true;
+      t.exitTime = t.lastInTime; // 最後に在席した時刻を退出時刻とする (デバウンス分は含めない)
+      const dur = t.exitTime - t.enterTime;
+      const avg = dur > 1e-6 ? t.lengthSl / dur : 0;
+      recentTraversals.unshift({
+        id,
+        time_s: dur,
+        length_sl_m: t.lengthSl,
+        avg_speed_kph: avg * MPS_TO_KPH,
+        speed_limit_kph: t.speedLimitMps * MPS_TO_KPH,
+      });
+      if (recentTraversals.length > RECENT_CAP) {
+        recentTraversals = recentTraversals.slice(0, RECENT_CAP);
       }
     }
   });
@@ -477,14 +496,10 @@ export default function script(
       mState = "completed";
       mTime = t.exitTime - t.enterTime;
       mAvgKph = mTime > 1e-6 ? (lenSl / mTime) * MPS_TO_KPH : 0;
-    } else if (t.everEgo && t.presentNow) {
+    } else if (t.everEgo) {
+      // 在席中、または退出デバウンス中 (まだ確定していない) → 進行中扱い
       mState = "in_progress";
       mTime = t.lastInTime - t.enterTime;
-    } else if (t.everEgo) {
-      // 過去に乗ったが完了フラグ未設定 (通常は起きない)
-      mState = "completed";
-      mTime = t.lastInTime - t.enterTime;
-      mAvgKph = mTime > 1e-6 ? (lenSl / mTime) * MPS_TO_KPH : 0;
     }
 
     targets.push({

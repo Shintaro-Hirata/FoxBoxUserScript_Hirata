@@ -32,7 +32,6 @@ type InEgoPose = {
   local_linear_velocity?: Vec3;
   linear_velocity?: Vec3;
   local_linear_acceleration?: Vec3;
-  linear_acceleration?: Vec3;
   angular_velocity?: Vec3;
   local_angular_velocity?: Vec3;
 };

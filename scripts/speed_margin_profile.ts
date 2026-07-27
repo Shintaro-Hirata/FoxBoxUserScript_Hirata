@@ -37,6 +37,8 @@ type InLaneSeg = {
   target_speed_max?: number;
   is_tollgate?: boolean;
   is_tunnel?: boolean;
+  is_target_lane?: boolean;
+  is_route?: boolean;
   location_context?: InLocationContext;
 };
 type InScene = {
@@ -97,7 +99,14 @@ function isNum(v: unknown): v is number {
   return typeof v === "number" && isFinite(v);
 }
 function num(v: unknown, dflt: number): number {
-  return isNum(v) ? v : dflt;
+  if (isNum(v)) {
+    return v;
+  }
+  // ROS2 の uint64/int64 (例: ego_lane_segment_indices) は Foxglove では bigint で届く。
+  if (typeof v === "bigint") {
+    return Number(v);
+  }
+  return dflt;
 }
 function isVec3(v: unknown): v is Vec3 {
   if (v == null || typeof v !== "object") {
@@ -286,7 +295,8 @@ export default function script(
     segProfiles.push(buildProfile(s, "ego", 0, latAccel, egoKph));
   }
 
-  // 先読み: primary ego セグメントから successor_ids[0] を辿る
+  // 先読み: primary ego セグメントから successor を辿る。
+  // 分岐では is_target_lane / is_route の後継を優先し、無ければ最初に見つかった後継。
   const lookahead: SegProfile[] = [];
   const used = new Set<string>();
   for (const s of egoSegs) {
@@ -298,14 +308,25 @@ export default function script(
   for (let n = 0; n < lookN && cur != null; n++) {
     const succ = Array.isArray(cur.successor_ids) ? cur.successor_ids : [];
     let next: InLaneSeg | undefined;
+    let firstExisting: InLaneSeg | undefined;
     for (const sid of succ) {
-      if (!used.has(sid)) {
-        const hit = segById.get(sid);
-        if (hit != null) {
-          next = hit;
-          break;
-        }
+      if (used.has(sid)) {
+        continue;
       }
+      const hit = segById.get(sid);
+      if (hit == null) {
+        continue;
+      }
+      if (firstExisting == null) {
+        firstExisting = hit;
+      }
+      if (hit.is_target_lane === true || hit.is_route === true) {
+        next = hit;
+        break;
+      }
+    }
+    if (next == null) {
+      next = firstExisting;
     }
     if (next == null) {
       break;

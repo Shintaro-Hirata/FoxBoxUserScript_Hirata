@@ -41,16 +41,13 @@ type InBBoxInfo = {
   type?: number;
 };
 type InTrackingInfo = {
-  velocity?: Vec3;
   local_velocity?: Vec3;
   local_relative_velocity?: Vec3;
-  track_id?: number;
   is_stationary?: boolean;
 };
 type InAugObj = {
   bbox_info?: InBBoxInfo;
   tracking_info?: InTrackingInfo;
-  track_id?: number;
 };
 type InLaneSeg = {
   id?: string;
@@ -59,7 +56,7 @@ type InLaneSeg = {
   central_curve?: Vec3[];
 };
 type InScene = {
-  local_map_info?: { local_lane_segments?: InLaneSeg[] };
+  local_map_info?: { local_lane_segments?: InLaneSeg[]; ego_lane_segment_indices?: number[] };
   augmented_objects?: InAugObj[];
 };
 type InEgoPose = {
@@ -93,7 +90,7 @@ type Output = {
   follower_found: boolean;
   follower_track_id: number;
   follower_gap_s_m: number;          // 後方車間 (SL, 正値)
-  follower_gap_chord_m: number;      // 投影点間の直線距離 (参考)
+  follower_gap_chord_m: number;      // 自車原点→追従車の直線距離 (参考)
   follower_lateral_l_m: number;
   follower_abs_speed_mps: number;    // 対地速度 (local_velocity)
   follower_abs_speed_kph: number;
@@ -128,7 +125,14 @@ function isNum(v: unknown): v is number {
   return typeof v === "number" && isFinite(v);
 }
 function num(v: unknown, dflt: number): number {
-  return isNum(v) ? v : dflt;
+  if (isNum(v)) {
+    return v;
+  }
+  // ROS2 の uint64/int64 (例: ego_lane_segment_indices) は Foxglove では bigint で届く。
+  if (typeof v === "bigint") {
+    return Number(v);
+  }
+  return dflt;
 }
 function isVec3(v: unknown): v is Vec3 {
   if (v == null || typeof v !== "object") {
@@ -160,17 +164,10 @@ function speedMag(v: Vec3 | undefined): number {
   }
   return Math.sqrt(v.x * v.x + v.y * v.y);
 }
+// 物体 ID は TrackedBbox.id (int32)。IDL 上 AugmentedObject/ObjectTrackingInfo に
+// track_id は存在しないため bbox_info.id を用いる。
 function getTrackId(ao: InAugObj): number {
-  if (isNum(ao.track_id)) {
-    return ao.track_id;
-  }
-  if (ao.tracking_info && isNum(ao.tracking_info.track_id)) {
-    return ao.tracking_info.track_id;
-  }
-  if (ao.bbox_info && isNum(ao.bbox_info.id)) {
-    return ao.bbox_info.id;
-  }
-  return -1;
+  return ao.bbox_info && isNum(ao.bbox_info.id) ? ao.bbox_info.id : -1;
 }
 
 // 点 p を線分 a-b に 2D 投影 (t と投影点, 距離)。
@@ -189,7 +186,11 @@ function ptSegXYWithT(p: Vec3, a: Vec3, b: Vec3): { t: number; point: Vec3; dist
 }
 
 // 自車レーンの central_curve を +x 前方に固定して前後に結合する。
-function chainEgoCentral(segments: InLaneSeg[]): { central: Vec3[]; count: number } {
+// egoHint (ego_lane_segment_indices から解決したセグメント) があればそれを起点にし、
+// 無ければ原点 (0,0) に最も近い central_curve 頂点を持つセグメントを起点にする。
+function chainEgoCentral(
+  segments: InLaneSeg[], egoHint: InLaneSeg | undefined,
+): { central: Vec3[]; count: number } {
   const empty = { central: [] as Vec3[], count: 0 };
   if (segments.length === 0) {
     return empty;
@@ -200,18 +201,22 @@ function chainEgoCentral(segments: InLaneSeg[]): { central: Vec3[]; count: numbe
       segById.set(s.id, s);
     }
   }
-  let egoSeg: InLaneSeg | undefined;
-  let egoMinD = Number.POSITIVE_INFINITY;
-  for (const s of segments) {
-    const cc = s.central_curve;
-    if (!Array.isArray(cc)) {
-      continue;
-    }
-    for (const p of cc) {
-      const d = p.x * p.x + p.y * p.y;
-      if (d < egoMinD) {
-        egoMinD = d;
-        egoSeg = s;
+  let egoSeg: InLaneSeg | undefined =
+    egoHint && Array.isArray(egoHint.central_curve) && egoHint.central_curve.length >= 2
+      ? egoHint : undefined;
+  if (egoSeg == null) {
+    let egoMinD = Number.POSITIVE_INFINITY;
+    for (const s of segments) {
+      const cc = s.central_curve;
+      if (!Array.isArray(cc)) {
+        continue;
+      }
+      for (const p of cc) {
+        const d = p.x * p.x + p.y * p.y;
+        if (d < egoMinD) {
+          egoMinD = d;
+          egoSeg = s;
+        }
       }
     }
   }
@@ -390,11 +395,23 @@ export default function script(
   const msg = event.message as unknown as InScene;
   const segments: InLaneSeg[] = Array.isArray(msg.local_map_info?.local_lane_segments)
     ? msg.local_map_info!.local_lane_segments! : [];
+  const indices: number[] = Array.isArray(msg.local_map_info?.ego_lane_segment_indices)
+    ? msg.local_map_info!.ego_lane_segment_indices! : [];
   const objects: InAugObj[] = Array.isArray(msg.augmented_objects) ? msg.augmented_objects : [];
   const lThresh = Math.max(0.1, num(globalVars.same_lane_l_threshold_m, 1.75));
   const stamp: Stamp = { sec: num(event.receiveTime?.sec, 0), nsec: num(event.receiveTime?.nsec, 0) };
 
-  const chained = chainEgoCentral(segments);
+  // 自車セグメント: ego_lane_segment_indices を優先し SL フレームの起点にする
+  // (最近傍頂点より確実。車線変更中に隣接レーンを掴むのを防ぐ)。
+  let egoHint: InLaneSeg | undefined;
+  for (const raw of indices) {
+    const idx = Math.trunc(num(raw, -1));
+    if (idx >= 0 && idx < segments.length) {
+      egoHint = segments[idx]!;
+      break;
+    }
+  }
+  const chained = chainEgoCentral(segments, egoHint);
   const central = chained.central;
   const slValid = central.length >= 2;
   const cumS = slValid ? cumulativeSFromEgo(central) : [];

@@ -123,4 +123,7 @@ AugmentedScene
 - **速度は m/s**（制限速度含む）。km/h 表示はスクリプト側で `×3.6`。
 - **物体速度の3フレーム**: `velocity`=世界絶対 / `local_velocity`=車両系絶対 / `local_relative_velocity`=車両系の対自車相対（後続車の接近判定に使う）。
 - **`ego_lane_segment_indices` は index**（`local_lane_segments` への添字）。空になり得る（その場合は原点最近傍でフォールバック）。
+- **64bit 整数（uint64/int64）は Foxglove では `bigint` で届く**。`ego_lane_segment_indices`（uint64）が
+  代表例。数値化ヘルパ `num()` は `typeof v === "bigint"` を `Number(v)` に変換して扱うこと。怠ると
+  全 index が破棄され、自車セグメント特定・通過時間計測が**無言で壊れる**（実データでのみ顕在化）。
 - 配列容量: `kLaneCurveCapacity=180`, `kLocalLaneSegmentCapacity=500`, `kEgoLaneSegmentCapacity=20`。

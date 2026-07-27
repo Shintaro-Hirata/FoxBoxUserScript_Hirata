@@ -35,7 +35,6 @@ type Stamp = { sec: number; nsec: number };
 type GlobalVariables = Record<string, unknown>;
 
 // --- 入力型 ------------------------------------------------------------------
-type InLaneBoundary = { curve?: Vec3[] };
 type InLocationContext = { location?: number | string; context?: number | string };
 
 type InLaneSeg = {
@@ -46,8 +45,6 @@ type InLaneSeg = {
   left_neighbor_forward_id?: string[];
   right_neighbor_forward_id?: string[];
   central_curve?: Vec3[];
-  left_boundary?: InLaneBoundary;
-  right_boundary?: InLaneBoundary;
   length?: number;
   nth_lane?: number;
   speed_limit_max?: number;
@@ -167,7 +164,14 @@ const CLASSIFICATION_NAMES = [
 ];
 
 function num(v: unknown, dflt: number): number {
-  return typeof v === "number" && isFinite(v) ? v : dflt;
+  if (typeof v === "number" && isFinite(v)) {
+    return v;
+  }
+  // ROS2 の uint64/int64 (例: ego_lane_segment_indices) は Foxglove では bigint で届く。
+  if (typeof v === "bigint") {
+    return Number(v);
+  }
+  return dflt;
 }
 // enum フィールドを数値として読む (Foxglove では整数, 念のため文字列も許容)
 function enumNum(v: unknown): number {

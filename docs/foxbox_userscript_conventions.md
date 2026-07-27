@@ -95,3 +95,27 @@ Foxglove は最初の出力メッセージから出力トピックのスキー�
   - `test/tsconfig.build.json` は `scripts/**` を拾うので追加不要。
   - `test/behavior.test.cjs` に合成データの assertion を足す（`require("./out/<name>.js").default`）。
 - ステートフルなロジック（enter/exit, EMA, Seek リセット, SL 投影, 曲率）は特に合成テストで固める。
+- **合成テストの数値は実データと型が違う点に注意**（下記 11）。特に uint64 は number で書きがちだが実際は bigint。
+
+## 11. 64bit 整数は `bigint`（ハマりどころ）
+
+- ROS2 の `uint64`/`int64` フィールドは Foxglove のデコーダで **`bigint`** として届く
+  （`number` ではない）。代表例は `ego_lane_segment_indices`（`sequence<uint64>`）。
+- 数値化ヘルパは必ず bigint を受ける:
+  ```ts
+  function num(v: unknown, dflt: number): number {
+    if (typeof v === "number" && isFinite(v)) { return v; }
+    if (typeof v === "bigint") { return Number(v); }
+    return dflt;
+  }
+  ```
+- これを怠ると index が全部 `dflt`（-1）になり、**エラーも出さずに機能が停止**する
+  （自車セグメント特定が空→フォールバック、通過時間計測が動かない等）。合成テストでは
+  `[BigInt(0)]` を渡して実データの型を再現すること。
+
+## 12. 常に空になり得る出力配列
+
+- 出力に配列（`targets` / `recent_traversals` / `behind_objects` / `related_segments` など）がある場合、
+  **最初のメッセージで空だと Foxglove がネスト要素のスキーマを推論できず**、Plot 等でその列が
+  最初の非空メッセージまで現れないことがある（コード欠陥ではないが利用者向けに周知）。
+- 対策: 変数（例: `target_segment_ids`）を設定してから再生する／要素が入るシーンまでシークする。
