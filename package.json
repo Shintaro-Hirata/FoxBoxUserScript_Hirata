@@ -1,0 +1,15 @@
+{
+  "name": "foxbox-userscripts-hirata",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FoxBox (Foxglove Studio) User Scripts for T2 Yatagarasu log analysis",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build:test": "tsc -p test/tsconfig.build.json",
+    "test": "npm run build:test && node test/behavior.test.cjs",
+    "verify": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
