@@ -386,7 +386,51 @@ Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_le
 
 ---
 
-### 3. `high_memory_processes.ts`
+### 3. `vehicle_distance.ts`
+
+**入力トピック**: `/t2/object_augmentor/augmented_scene`
+**出力トピック**: `/studio_script/vehicle_distance`
+
+`track_id` で指定した物体との**車間距離**を毎フレーム出力します。ALC 区間に依存せず、`augmented_scene` 単体で動作します。
+
+**座標系の前提（重要）:**
+
+`bbox_info.local_position` は車両座標系における**物体中心**の位置です。車両座標系の原点は自車のバンパー位置ではなく、自車の車体は `x ∈ [-back_edge_to_center, +front_edge_to_center]` の範囲を占めます（いすゞギガ: front **4.726 m** / back **7.259 m** / 半幅 **1.295 m**、`generation_param/*/isuzu_giga_param.txtpb` 参照）。そのため `local_position` の単純なノルムは「原点↔物体中心」の距離であり、接触までの距離より最大 7 m + 物体半長 ほど大きく出ます。本スクリプトは自車矩形と物体矩形（`local_theta` / `length` / `width` から構築）の**最短 2D 距離** `clearance_m` を主指標とし、後方の物体は自動的に「自車最後部からの距離」になります。
+
+**Variables パネルで設定する変数:**
+
+| 変数名 | 型 | 説明 |
+|---|---|---|
+| `track_id` | number | 追跡する物体の track_id（`bbox_info.id`）（必須） |
+| `ego_front_edge_m` | number | 原点→自車最前部 [m]（省略時 4.726） |
+| `ego_back_edge_m` | number | 原点→自車最後部 [m]（省略時 7.259） |
+| `ego_half_width_m` | number | 自車半幅 [m]（省略時 1.295） |
+
+**主な出力フィールド:**
+
+| フィールド | 説明 |
+|---|---|
+| `clearance_m` | 自車矩形 ↔ 物体矩形の最短 2D 距離 [m]（接触時 0）。**車間距離のプロットに推奨** |
+| `longitudinal_gap_m` | 前後方向のバンパー間ギャップ [m]（x 範囲が重なると 0） |
+| `lateral_gap_m` | 横方向の車体間ギャップ [m]（y 範囲が重なると 0） |
+| `distance_center_norm_m` | 原点→物体中心の 2D ノルム [m]（当初仕様の参考値） |
+| `relative_position` | `"front"` / `"rear"` / `"side"`（物体中心の位置関係） |
+| `closing_speed_mps` | 前後方向の接近速度 [m/s]（`local_relative_velocity` 由来、正 = 接近中） |
+| `ttc_s` | `longitudinal_gap_m / closing_speed_mps`（非接近時・接触時は -1） |
+| `match_found` | track_id が見つかれば true |
+
+**Plot パネルでの活用例:**
+
+```
+vehicle_distance.clearance_m           # 接触までの最短距離（メイン）
+vehicle_distance.longitudinal_gap_m    # 同一レーン前後車との車間
+vehicle_distance.ttc_s                 # 衝突余裕時間
+vehicle_distance.distance_center_norm_m
+```
+
+---
+
+### 4. `high_memory_processes.ts`
 
 **入力トピック**: `/t2/resource_monitor/raw`
 **出力トピック**: `/studio_script/high_memory_processes`
