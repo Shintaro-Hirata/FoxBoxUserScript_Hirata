@@ -391,23 +391,71 @@ Plot パネルで **X 軸に `target_s_m`、Y 軸に `distance_target_edge_to_le
 **入力トピック**: `/t2/resource_monitor/raw`
 **出力トピック**: `/studio_script/high_memory_processes`
 
-`process_info` から resident_memory が閾値以上のプロセスを抽出します。
+resource_monitor の raw 情報から以下をまとめて出力します。
+
+1. `process_info` から resident_memory が閾値以上のプロセスを抽出
+2. 全プロセスの resident_memory 合計
+3. システム全体のメモリ使用量（`memory_info` の total − free）
+4. ECU 全体の CPU 使用率 [%]（`cpu_info` の累積カウンタから算出）
+
+CPU 使用率は、`cpu_active_time` / `cpu_total_time`（起動からの累積時間 [ns]）の
+時間窓内の増分比 `Δactive / Δtotal × 100` で計算します。これは Yatagarasu の
+`resource_error_monitor_node`（`CpuUsageCalculator`、窓 2000ms）と同じ方式です。
+累積カウンタのままでは Plot パネルで率として見られないため、このスクリプトで
+使用率に変換しています。
 
 **Variables パネルで設定する変数:**
 
 | 変数名 | 型 | 説明 |
 |---|---|---|
 | `memory_threshold_mb` | number | メモリ閾値 [MB]（省略時 100MB） |
+| `cpu_window_ms` | number | CPU 使用率の計算窓 [ms]（省略時 2000ms） |
 
 **主な出力フィールド:**
 
 | フィールド | 説明 |
 |---|---|
+| `total_resident_memory_mb` | **全プロセス**の resident_memory 合計 [MB] |
+| `filtered_resident_memory_mb` | 閾値以上のプロセスのみの合計 [MB] |
+| `system_used_ram_mb` | システム全体の使用メモリ [MB]（total − free） |
+| `system_free_ram_mb` / `system_total_ram_mb` | 空き / 搭載 RAM [MB] |
+| `system_used_ram_percent` | メモリ使用率 [%] |
+| `system_memory_valid` | `memory_info` が取得できた場合 true |
+| `cpu_usage_percent` | ECU 全体の CPU 使用率 [%]（全コア合計に対する割合） |
+| `cpu_used_cores` | 使用中コア数換算（`num_cpu_cores × 使用率`） |
+| `num_cpu_cores` | CPU コア数 |
+| `cpu_valid` | `cpu_info` が有効な場合 true（最初の 1〜2 メッセージは 0% になります） |
 | `filtered_count` | 閾値以上のプロセス数 |
 | `filtered_processes[i].index` | `process_info` の元インデックス |
 | `filtered_processes[i].name` | プロセス名 |
 | `filtered_processes[i].pid` | PID |
 | `filtered_processes[i].resident_memory_mb` | メモリ使用量 [MB] |
+
+**Plot パネルでの推移確認例:**
+
+```
+# CPU 使用率の推移
+/studio_script/high_memory_processes.cpu_usage_percent
+
+# メモリ消費量の推移
+/studio_script/high_memory_processes.system_used_ram_mb
+/studio_script/high_memory_processes.total_resident_memory_mb
+```
+
+**メモリ合計値の読み方:**
+
+- `total_resident_memory_mb`（ΣRSS）は共有メモリ・共有ライブラリを
+  プロセス間で重複カウントするため、実際のシステム使用量より大きく出ます。
+- ECU 全体の実使用量は `system_used_ram_mb`（`/proc/meminfo` ベース）を
+  参照してください。カーネルやキャッシュを含む実態に近い値です。
+
+**スクリプトなしで見られるもの / 見られないもの:**
+
+- `memory_info[0].free_ram_mem` などの生値（単位 KB）は raw トピックを
+  Plot パネルに直接指定すれば表示できます。
+- CPU 使用率は raw には累積時間しかなく、メッセージ間の差分計算が必要なため
+  Plot パネル単体では表示できません（本スクリプトが必要な理由）。
+- 全プロセスのメモリ合計や total − free の算術も同様にスクリプトが必要です。
 
 ---
 
