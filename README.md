@@ -444,10 +444,22 @@ CPU 使用率は、`cpu_active_time` / `cpu_total_time`（起動からの累積�
 
 **メモリ合計値の読み方:**
 
-- `total_resident_memory_mb`（ΣRSS）は共有メモリ・共有ライブラリを
-  プロセス間で重複カウントするため、実際のシステム使用量より大きく出ます。
-- ECU 全体の実使用量は `system_used_ram_mb`（`/proc/meminfo` ベース）を
-  参照してください。カーネルやキャッシュを含む実態に近い値です。
+`total_resident_memory_mb` と `system_used_ram_mb` は測っている対象が
+異なるため、大小関係はどちらにもなり得ます。
+
+- `total_resident_memory_mb`（ΣRSS）の対象は **process manager 管理下の
+  プロセスのみ**です（`ecu_collector_node` が `/process_group_state` から
+  取得したプロセスを監視。`total_process_count` はその数）。OS 側の
+  非管理プロセスやカーネル使用分（slab・ページテーブル・GPU ドライバ
+  確保分など）は含まれません。
+- 一方で ΣRSS は共有メモリ・共有ライブラリをプロセス間で重複カウント
+  するため、監視対象分については実使用量より大きめに出ます。
+- `system_used_ram_mb`（total − free、`/proc/meminfo` ベース）は
+  カーネル・全プロセスを含む ECU 全体の使用量です。ECU の実使用量を
+  見る場合はこちらを参照してください。
+- 上記 2 つの効果（非管理分の欠落 vs 共有分の重複）のバランスにより、
+  ΣRSS が `system_used_ram_mb` より小さくなることも大きくなることも
+  あります。
 
 **スクリプトなしで見られるもの / 見られないもの:**
 
