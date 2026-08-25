@@ -397,6 +397,8 @@ resource_monitor の raw 情報から以下をまとめて出力します。
 2. 全プロセスの resident_memory 合計
 3. システム全体のメモリ使用量（`memory_info` の total − free）
 4. ECU 全体の CPU 使用率 [%]（`cpu_info` の累積カウンタから算出）
+5. プロセスごとの CPU 使用率 [%] と、CPU 使用率上位プロセス一覧
+   （どのプロセスが重いかの調査用）
 
 CPU 使用率は、`cpu_active_time` / `cpu_total_time`（起動からの累積時間 [ns]）の
 時間窓内の増分比 `Δactive / Δtotal × 100` で計算します。これは Yatagarasu の
@@ -410,6 +412,7 @@ CPU 使用率は、`cpu_active_time` / `cpu_total_time`（起動からの累積�
 |---|---|---|
 | `memory_threshold_mb` | number | メモリ閾値 [MB]（省略時 100MB） |
 | `cpu_window_ms` | number | CPU 使用率の計算窓 [ms]（省略時 2000ms） |
+| `cpu_top_n` | number | `top_cpu_processes` の件数（省略時 10。全件出す場合は 70 等） |
 
 **主な出力フィールド:**
 
@@ -425,22 +428,55 @@ CPU 使用率は、`cpu_active_time` / `cpu_total_time`（起動からの累積�
 | `cpu_used_cores` | 使用中コア数換算（`num_cpu_cores × 使用率`） |
 | `num_cpu_cores` | CPU コア数 |
 | `cpu_valid` | `cpu_info` が有効な場合 true（最初の 1〜2 メッセージは 0% になります） |
+| `top_cpu_processes` | CPU 使用率の高い順に `cpu_top_n` 件（同率はメモリ降順） |
 | `filtered_count` | 閾値以上のプロセス数 |
-| `filtered_processes[i].index` | `process_info` の元インデックス |
-| `filtered_processes[i].name` | プロセス名 |
-| `filtered_processes[i].pid` | PID |
-| `filtered_processes[i].resident_memory_mb` | メモリ使用量 [MB] |
+| `filtered_processes` | resident_memory が閾値以上のプロセス（メモリ降順） |
+
+`top_cpu_processes[i]` / `filtered_processes[i]` の各要素は共通で
+以下を持ちます。
+
+| フィールド | 説明 |
+|---|---|
+| `index` | `process_info` の元インデックス |
+| `name` | プロセス名 |
+| `pid` | PID |
+| `resident_memory_mb` | メモリ使用量 [MB] |
+| `cpu_percent` | そのプロセスの CPU 使用率 [%]（ECU 全体 = 全コア合計に対する割合） |
+| `cpu_used_cores` | コア数換算（`num_cpu_cores × cpu_percent / 100`） |
+
+プロセスごとの CPU 使用率は `utime + stime + cutime + cstime`
+（そのプロセスと wait 済み子プロセスの累積 CPU 時間）の増分を、ECU の
+`cpu_total_time` の増分で割ったもので、`resource_error_monitor_node` の
+プロセス別 CPU Load と同方式です。分母が全コア合計のため、**1 コアを
+フルに使うプロセスは 32 コア機で約 3.1%** になります。直感的に見たい
+場合は `cpu_used_cores`（コア数換算）を使ってください。
 
 **Plot パネルでの推移確認例:**
 
 ```
-# CPU 使用率の推移
+# ECU 全体
 /studio_script/high_memory_processes.cpu_usage_percent
-
-# メモリ消費量の推移
 /studio_script/high_memory_processes.system_used_ram_mb
 /studio_script/high_memory_processes.total_resident_memory_mb
+
+# その時々で最も CPU を使っているプロセス（順位変動で対象が入れ替わる点に注意）
+/studio_script/high_memory_processes.top_cpu_processes[0].cpu_percent
+
+# 特定プロセスを追跡（メッセージパスのフィルタ構文。名前は Raw Messages で確認）
+/studio_script/high_memory_processes.top_cpu_processes[:]{name=="planning"}.cpu_used_cores
+/studio_script/high_memory_processes.filtered_processes[:]{name=="planning"}.resident_memory_mb
 ```
+
+**重いプロセスの調査手順の目安:**
+
+1. Plot で `cpu_usage_percent`（ECU 全体）を出し、重くなる時間帯を特定
+2. その時間帯で Raw Messages の `top_cpu_processes` を見て犯人候補を把握
+   （Table パネルに `top_cpu_processes` を指定すると一覧で見やすい）
+3. 候補プロセスを `top_cpu_processes[:]{name=="..."}.cpu_used_cores` で
+   プロット（`cpu_top_n` を大きめにしておくと順位落ちで途切れない）
+
+プロセスが再起動して PID が変わると、そのプロセスの履歴はリセットされ
+1〜2 メッセージの間 0% になります（PID 変更 = 再起動の検出にも使えます）。
 
 **メモリ合計値の読み方:**
 
