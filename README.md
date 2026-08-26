@@ -507,6 +507,243 @@ CPU 使用率は、`cpu_active_time` / `cpu_total_time`（起動からの累積�
 
 ---
 
+### 4. `ego_lane_segments.ts`
+
+**入力トピック**: `/t2/object_augmentor/augmented_scene`
+**出力トピック**: `/studio_script/ego_lane_segments`
+
+自車が属する `lane_segment` の `id` と長さ（**直線距離=弦長** / **SL 距離=弧長**）に加え、**左右の隣接・直前/直後（predecessor / successor）のセグメント `id`** と、**取得した各 `id` の `local_lane_segments` 詳細（lane_augmentor 出力の全フィールド）**を出力します（v2）。
+
+自車セグメントは `local_map_info.ego_lane_segment_indices`（augmentor が自車足元 ±0.1m で判定済みのインデックス列）を `local_lane_segments` のインデックスとして引いて特定します。`ego_lane_segment_indices` が空の場合のみ、`central_curve` への原点 (0,0) 最近傍セグメントにフォールバックします（`source` フィールドで判別可能）。
+
+**Variables パネルで設定する変数:** なし
+
+**長さの定義:**
+
+| フィールド | 定義 |
+|---|---|
+| `straight_m` | `central_curve` の始点→終点の 2D 直線距離（**直線距離 / 弦長**） |
+| `sl_m` | `central_curve` の 2D 累積弧長（**SL 距離**、道路に沿った長さ） |
+| `provided_length_m` | `LocalLaneSegment.length`（augmentor 提供値、検証/参考用） |
+
+> 直線区間では `straight_m ≈ sl_m`。カーブがあるほど `sl_m > straight_m` になります。
+
+**トップレベルの主な出力フィールド:**
+
+| フィールド | 説明 |
+|---|---|
+| `source` | セグメント特定方法（`ego_indices` / `projection_fallback` / `none`） |
+| `ego_segment_count` / `ego_segment_ids` | 自車が属するセグメント数 / `id` 一覧 |
+| `primary_segment_id` | 代表セグメント（先頭）の `id` |
+| `primary_context_name` | 代表セグメントの位置コンテキスト名（`HIGHWAY` / `ENTERING_ETC` / `PASSING_ETC` / `EXITING_ETC` など） |
+| `segments[]` | 自車セグメントの詳細（`relation="ego"`、下記 `SegmentDetail`） |
+| `related_segments[]` | 自車セグメントの隣接/前後セグメントの詳細（`relation` で関係を表す） |
+| `total_straight_m` / `total_sl_m` / `total_provided_m` | 全自車セグメントの**合計**長さ |
+
+**`SegmentDetail`（`segments[]` / `related_segments[]` 共通）の主なフィールド:**
+
+| フィールド | 説明 |
+|---|---|
+| `relation` | 自車との関係（`ego` / `predecessor` / `successor` / `left_neighbor` / `right_neighbor`） |
+| `relative_to_ego_id` | この関連の起点となった自車セグメント `id`（`ego` は空） |
+| `id` / `road_id` / `segment_index` | セグメント ID / 道路 ID / `local_lane_segments` 内の index |
+| `straight_m` / `sl_m` / `provided_length_m` / `point_count` | 長さ・点数 |
+| `ego_s_in_segment_m` | 自車原点をこのセグメントに投影した弧長（区間内のどこにいるか） |
+| `successor_ids` / `predecessor_ids` | **直後 / 直前**のセグメント `id`（複数可） |
+| `left_neighbor_ids` / `right_neighbor_ids` | **左 / 右**隣の同方向セグメント `id` |
+| `speed_limit_max_kph` / `speed_limit_min_kph` / `target_speed_max_kph` | 制限速度・目標速度 |
+| `nth_lane` / `lane_classification(_name)` / `split_merge_type` | 車線属性 |
+| `left_lc_permission` / `right_lc_permission` | 車線変更可否（enum 値） |
+| `is_target_lane` / `is_tollgate` / `is_tunnel` / `is_no_lane` / `is_out_of_course` / `is_slower_traffic` / `is_truck_lane` / `is_merging_anticipation` / `is_blockade_lane` | 各種フラグ |
+| `location(_name)` / `context(_name)` | 位置・状況コンテキスト（ETC 区間の判別に有用） |
+
+> **ETC 区間の特定**: `context_name`（`LocalLaneContext`）が `ENTERING_ETC` / `PASSING_ETC` / `EXITING_ETC` のセグメントが ETC 前後・通過区間です。`is_tollgate` と併せて対象区間の `id` を収集できます。
+> `lane_segment_traversal_time` で通過時間を測りたい `id` は、`ego_segment_ids` / `related_segments[].id` から収集できます。
+
+---
+
+### 5. `lane_segment_traversal_time.ts`
+
+**入力トピック**: `/t2/object_augmentor/augmented_scene`（必須）、`/t2/odometry/ego`（任意：現在速度の表示用）
+**出力トピック**: `/studio_script/lane_segment_traversal_time`
+
+指定した `id` の `lane_segment` を**通過するのにかかる時間**を出力します。**複数 id を同時に指定可能**です。
+
+**Variables パネルで設定する変数:**
+
+| 変数名 | 型 | 説明 |
+|---|---|---|
+| `target_segment_ids` | string | 対象セグメント `id`。カンマ/空白/セミコロン区切りで複数可（例: `"lane_001, lane_002 lane_003"`） |
+| `assumed_speeds_kph` | string | 推定に使う仮定速度 [km/h]（既定 `"10,30,40"`） |
+| `lateral_accel_limit_mps2` | number | 横加速度上限 [m/s²]（既定 `2.5`） |
+
+**出力する「時間」は 2 種類:**
+
+1. **実測通過時間 `measured_time_s`** — ログ再生中に自車が実際にそのセグメントを通過した時間。`ego_lane_segment_indices` で自車がそのセグメント上にいた区間を `event.receiveTime` で計測します（進入してから退出するまで）。**自車が実際にそのレーンを走行した場合のみ**得られます。分解能は `augmented_scene` の更新周期（約 0.1s）に依存します。
+2. **推定通過時間 `est_*_s`** — `区間長(SL) ÷ 速度` による推定。制限速度 / 仮定速度 / 現在の自車速度 / 横G制限速度で算出します。**地図に出現すれば（隣接レーンなど自車が走らない区間でも）算出可能**です。
+
+**対象セグメントごとの出力（`targets[i]`）:**
+
+| フィールド | 説明 |
+|---|---|
+| `id` | 対象セグメント `id` |
+| `latched` | 地図にこの `id` が出現し情報取得済みか（一度取得すると保持） |
+| `found_in_map_now` | 現フレームの地図に存在するか |
+| `length_sl_m` / `length_straight_m` / `length_provided_m` | SL 距離 / 直線距離 / 提供 length |
+| `speed_limit_max_kph` | 制限速度上限 [km/h] |
+| `is_tollgate` | 料金所（ETC）区間フラグ |
+| `min_curve_radius_m` | `central_curve` の最小曲率半径 [m]（直線相当は大きな値） |
+| `lateral_g_max_speed_kph` | 横G上限を満たす最大速度 `sqrt(a_lat · R)` [km/h] |
+| `measured_state` | `not_seen` / `in_progress` / `completed` |
+| `measured_time_s` | 実測通過時間 [s]（進行中はそこまでの経過） |
+| `measured_avg_speed_kph` | 実測平均速度 [km/h]（完了時 = `length_sl / measured_time`） |
+| `est_time_at_speed_limit_s` | 制限速度での推定通過時間 [s] |
+| `est_time_at_lateral_g_max_s` | 横G上限速度での推定通過時間 [s] |
+| `est_time_at_ego_speed_s` | 現在の自車速度での推定通過時間 [s] |
+| `est_times_at_assumed[j]` | 仮定速度ごとの `{ speed_kph, time_s }` |
+
+**自動蓄積フィールド（id 指定不要）:**
+
+| フィールド | 説明 |
+|---|---|
+| `current_ego_segment_ids` | 現在の自車セグメント `id` 一覧 |
+| `current_ego_elapsed_s` | 現在セグメント上での経過時間 [s] |
+| `recent_traversals[i]` | 自車が通過し終えたセグメント履歴（新しい順、最大 40 件）。`{ id, time_s, length_sl_m, avg_speed_kph, speed_limit_kph }` |
+
+> `recent_traversals` により、ログを一度再生するだけで「自車が走った各セグメントの実測通過時間と平均速度」の一覧が自動で貯まります。id を事前指定しなくても、通過区間の実測値を収集できます。
+
+**典型的なワークフロー（ETC 前後の速度上限見直し検討）:**
+1. `ego_lane_segments` を再生し、ETC 前後の対象セグメント `id` を収集する。
+2. それらを `target_segment_ids` に設定する。
+3. `measured_time_s` / `measured_avg_speed_kph`（実走の実態）と、`est_times_at_assumed`（例: 30→40km/h に上げた場合の所要時間）を比較する。
+4. `min_curve_radius_m` / `lateral_g_max_speed_kph` で「その区間はカーブ的に何 km/h まで横G 2.5 m/s² 以内で出せるか」を確認する。
+
+**Plot パネルでの活用例:**
+```
+# 現在セグメントの進捗・速度
+lane_segment_traversal_time.current_ego_elapsed_s
+lane_segment_traversal_time.ego_speed_kph
+
+# 指定セグメントの実測 vs 推定（targets は配列なのでインデックス指定）
+lane_segment_traversal_time.targets[0].measured_time_s
+lane_segment_traversal_time.targets[0].est_time_at_speed_limit_s
+lane_segment_traversal_time.targets[0].lateral_g_max_speed_kph
+```
+
+**注意:**
+- 実測時間は自車が対象レーンを実走した場合のみ。隣接レーンの区間は推定時間のみ得られます。
+- 実測分解能は地図更新周期（約 0.1s）に依存します。
+- Seek で時刻が巻き戻ると計測状態（`recent_traversals` / 進行中の計測）をリセットします。
+- 時間は SL（弧長）距離を速度で割って算出します（車両は車線に沿って走るため）。
+- `min_curve_radius_m` / `lateral_g_max_speed_kph` は 2D（x-y 平面）の `central_curve` 形状から算出する目安値です。実際の許容速度は勾配・カント・制御マージン等で変わります。
+
+---
+
+### 6. `follower_gap_tracker.ts`
+
+**入力トピック**: `/t2/object_augmentor/augmented_scene`（必須）、`/t2/odometry/ego`（任意：自車速度・車間時間用）
+**出力トピック**: `/studio_script/follower_gap_tracker`
+
+自車**後方・同一レーン**の追従車（follower）を追跡し、車間（SL 距離）・相対速度（接近率）・追従車の対地速度・車間時間（time headway）を出力します。ETC 前後で後続車が「**詰まる**」様子を定量化するための指標です。
+
+自車レーンの `central_curve` を `successor_ids` / `predecessor_ids` で前後に結合して SL 座標（S=0 は自車投影点）を構築し、各 `augmented_object` を投影します。`|L| ≤ 閾値` かつ `S < 0` を後方同一レーン車とみなし、最近傍（S が 0 に最も近い負値）を follower とします。
+
+**Variables パネルで設定する変数:**
+
+| 変数名 | 型 | 説明 |
+|---|---|---|
+| `same_lane_l_threshold_m` | number | 同一レーン判定の `|L|` 閾値 [m]（既定 `1.75`） |
+
+**主な出力フィールド:**
+
+| フィールド | 説明 |
+|---|---|
+| `follower_found` / `follower_track_id` | 追従車の有無 / track_id |
+| `follower_gap_s_m` | 後方車間（SL/弧長、正値） |
+| `follower_gap_chord_m` | 自車原点→追従車の直線距離（参考） |
+| `follower_lateral_l_m` | 追従車の横ずれ L |
+| `follower_abs_speed_mps` / `_kph` | 追従車の**対地速度**（`local_velocity`） |
+| `follower_relative_long_mps` | 自車に対する前後相対速度（**+で接近**、`local_relative_velocity.x`） |
+| `follower_closing` | 接近中か（相対速度 > 0.1） |
+| `follower_time_headway_s` | 車間時間 = `gap_s / 追従車速度`（**詰まりの主要指標**） |
+| `follower_is_stationary` | 追従車が停止判定か |
+| `follower_gap_ema_m` / `follower_relative_ema_mps` | 車間・相対速度の指数移動平均（同一 track_id 間で平滑化） |
+| `leader_*` | 前方最近傍車（参考） |
+| `behind_count` / `ahead_count` | 同一レーンの後方/前方車両数 |
+| `behind_objects[]` | 後方キュー（車間が近い順、最大 10 件）。`{ track_id, gap_s_m, lateral_l_m, abs_speed_*, relative_long_mps, is_stationary, type }` |
+
+> **詰まりの読み方**: `follower_gap_s_m` が縮小 / `follower_time_headway_s` が低下 / `follower_closing=true` が続く、または `behind_count` が増えるほど後続が詰まっています。ETC 前後区間（`ego_lane_segments.primary_context_name` 等で判別）でこれらを時系列比較してください。
+
+---
+
+### 7. `lateral_g_monitor.ts`
+
+**入力トピック**: `/t2/odometry/ego`
+**出力トピック**: `/studio_script/lateral_g_monitor`
+
+自車の**実測横加速度（横G）**を出力し、横G上限と比較します。「2.5 m/s² 制約により ETC 前後を 30km/h に制限している」前提を実データで確認し、速度引き上げ余地を評価するための指標です。
+
+**Variables パネルで設定する変数:**
+
+| 変数名 | 型 | 説明 |
+|---|---|---|
+| `lateral_accel_limit_mps2` | number | 横加速度上限 [m/s²]（既定 `2.5`） |
+| `ma_window` | number | 移動平均/窓ピークのサンプル数（既定 `11`） |
+
+**横G の 2 系統**（通常ほぼ一致。相互検証用）:
+- `lateral_accel_measured_mps2` … `local_linear_acceleration.y`（車両座標系の横加速度推定）
+- `lateral_accel_kinematic_mps2` … `speed × yaw_rate`（旋回による求心加速度）
+
+**主な出力フィールド:**
+
+| フィールド | 説明 |
+|---|---|
+| `speed_mps` / `_kph` | 自車速度 |
+| `yaw_rate_radps` / `_degps` | ヨーレート |
+| `lateral_accel_measured_mps2` / `_abs_mps2` | 実測横G（符号付き / 絶対値） |
+| `lateral_accel_kinematic_mps2` / `_abs_mps2` | 運動学的横G（`v·ω`） |
+| `longitudinal_accel_mps2` | 前後加速度（参考） |
+| `limit_mps2` / `ratio_measured` / `margin_measured_mps2` | 上限 / 比率 / 余裕 |
+| `over_limit` | 実測横G が上限超過か |
+| `peak_abs_mps2` | リセット以降の最大横G |
+| `ma_abs_mps2` / `windowed_peak_abs_mps2` | 移動平均 / 窓内ピーク |
+
+> **使い方**: ETC 前後カーブで `lateral_accel_measured_abs_mps2` が実際に 2.5 に達しているか、`margin_measured_mps2` にどれだけ余裕があるかを確認します。30km/h で余裕があれば速度引き上げの根拠になります。`ego_lane_segments` の `context_name` と同一タイムラインで重ねると区間対応が分かります。
+
+---
+
+### 8. `speed_margin_profile.ts`
+
+**入力トピック**: `/t2/object_augmentor/augmented_scene`（必須）、`/t2/odometry/ego`（任意：現在速度）
+**出力トピック**: `/studio_script/speed_margin_profile`
+
+自車の現在レーンと**先読み（successor 連鎖）**の各区間について、**現在速度 / 制限速度 / 横G上限速度**を並べ、引き上げ余地を可視化します。「ETC 前後で制限速度を上げて良いか」を区間単位で判断する材料です。
+
+**Variables パネルで設定する変数:**
+
+| 変数名 | 型 | 説明 |
+|---|---|---|
+| `lateral_accel_limit_mps2` | number | 横加速度上限 [m/s²]（既定 `2.5`） |
+| `lookahead_count` | number | 先読みするセグメント数（既定 `5`） |
+
+**区間プロファイル（`segments[]` = 自車、`lookahead[]` = 先読み）の主なフィールド:**
+
+| フィールド | 説明 |
+|---|---|
+| `id` / `relation` / `order` | セグメント ID / `ego` or `lookahead` / 先読み順 |
+| `context_name` / `is_tollgate` / `is_tunnel` | 区間種別（ETC 等） |
+| `sl_m` | SL 距離 |
+| `speed_limit_kph` / `target_speed_max_kph` | 制限速度 / 目標速度 |
+| `min_curve_radius_m` / `lateral_g_max_speed_kph` | 最小曲率半径 / 横G上限速度 `sqrt(a·R)` |
+| `current_speed_kph` | 自車現在速度 |
+| `margin_to_limit_kph` / `margin_to_latg_max_kph` | 制限速度・横G上限速度までの余裕 |
+| `raise_ok` | **横G上限速度 ≥ 制限速度**（制限速度まで横G制約内で到達可能か） |
+| `est_time_at_current_s` / `est_time_at_limit_s` / `est_time_at_latg_max_s` | 各速度での通過時間 |
+
+> **判断の目安**: `raise_ok=true` かつ `lateral_g_max_speed_kph` が目標速度を上回る区間は、横G制約内で増速できる候補です。`context_name` が `ENTERING_ETC` / `EXITING_ETC` の区間で確認してください。
+
+---
+
 ## 制約と注意事項
 
 ### SL 座標系

@@ -163,27 +163,6 @@ function dist3(a: Vec3, b: Vec3): number {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-function ptSeg(p: Vec3, a: Vec3, b: Vec3): { dist: number; point: Vec3 } {
-  const abx = b.x - a.x; const aby = b.y - a.y; const abz = b.z - a.z;
-  const lenSq = abx * abx + aby * aby + abz * abz;
-  if (lenSq === 0) return { dist: dist3(p, a), point: copyVec3(a) };
-  const t = Math.max(0, Math.min(1,
-    ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / lenSq));
-  const proj: Vec3 = { x: a.x + t * abx, y: a.y + t * aby, z: a.z + t * abz };
-  return { dist: dist3(p, proj), point: proj };
-}
-
-function ptCurve(p: Vec3, c: Vec3[]): { dist: number; point: Vec3; index: number } {
-  if (c.length === 0) return { dist: -1, point: zeroVec3(), index: -1 };
-  if (c.length === 1) return { dist: dist3(p, c[0]!), point: copyVec3(c[0]!), index: 0 };
-  let bd = Number.POSITIVE_INFINITY; let bp = zeroVec3(); let bi = 0;
-  for (let i = 0; i < c.length - 1; i++) {
-    const r = ptSeg(p, c[i]!, c[i + 1]!);
-    if (r.dist < bd) { bd = r.dist; bp = r.point; bi = i; }
-  }
-  return { dist: bd, point: bp, index: bi };
-}
-
 function ptCurve2D(p: Vec3, c: Vec3[]): { dist: number; point: Vec3; index: number } {
   if (c.length === 0) return { dist: -1, point: zeroVec3(), index: -1 };
   if (c.length === 1) return { dist: dist2D(p, c[0]!), point: copyVec3(c[0]!), index: 0 };
@@ -193,11 +172,6 @@ function ptCurve2D(p: Vec3, c: Vec3[]): { dist: number; point: Vec3; index: numb
     if (r.dist2D < bd) { bd = r.dist2D; bp = r.point; bi = i; }
   }
   return { dist: bd, point: bp, index: bi };
-}
-
-function minDist(p: Vec3, c: Vec3[]): number {
-  if (c.length === 0) return Number.POSITIVE_INFINITY;
-  return ptCurve(p, c).dist;
 }
 
 // --- SL 座標系ユーティリティ ------------------------------------------------
@@ -260,17 +234,13 @@ function cumulativeSFromEgo(c: Vec3[]): { cumS: number[]; egoClosestIdx: number 
 
 // --- セグメント結合 (双方向) ------------------------------------------------
 // ego segment を +x 方向に固定し、前方・後方の両方向に lane segment を結合する。
-// 結合候補の選別 (優先順):
-//   (1) successor_ids / predecessor_ids → ID ベースで直接接続 (最も正確)
-//   (2) road_id → 同一 road_id + endpoint 近接
-//   (3) endpoint 近接 + 横方向チェック (perpDist < 3m) で他車線を排除
+// 結合候補は successor_ids / predecessor_ids による ID ベース接続のみ
+// (他車線を拾うリスクを避けるため endpoint 近接フォールバックは廃止)。
 function chainLaneBidir(
   segments: InLaneSeg[]
 ): { central: Vec3[]; left: Vec3[]; right: Vec3[]; count: number } {
   const empty = { central: [] as Vec3[], left: [] as Vec3[], right: [] as Vec3[], count: 0 };
   if (segments.length === 0) return empty;
-  const CONNECT_THRESH = 10.0;
-  const LATERAL_THRESH = 3.0;
 
   // segment を id で引くための Map
   const segById = new Map<string, InLaneSeg>();
@@ -286,11 +256,6 @@ function chainLaneBidir(
     }
   }
   if (!egoSeg || egoSeg.central_curve.length < 2) return empty;
-
-  // successor_ids / predecessor_ids が利用可能か判定
-  const hasConnectivity = Array.isArray(egoSeg.successor_ids) || Array.isArray(egoSeg.predecessor_ids);
-  const egoRoadId = typeof egoSeg.road_id === "string" && egoSeg.road_id.length > 0
-    ? egoSeg.road_id : "";
 
   function ori(s: InLaneSeg, rev: boolean): { cc: Vec3[]; lb: Vec3[]; rb: Vec3[] } {
     if (!rev) return {
@@ -314,37 +279,6 @@ function chainLaneBidir(
       if (found && found.central_curve.length >= 2) return found;
     }
     return undefined;
-  }
-
-  // endpoint 近接フォールバック: road_id + 横方向チェック付き
-  function findByEndpoint(
-    tip: Vec3, prev: Vec3, usedSet: Set<string>, mode: "fwd" | "bwd"
-  ): { seg: InLaneSeg; rev: boolean } | undefined {
-    let best: InLaneSeg | undefined; let bd = CONNECT_THRESH; let br = false;
-    for (const s of segments) {
-      if (usedSet.has(s.id) || s.central_curve.length < 2) continue;
-      if (egoRoadId.length > 0 && s.road_id !== egoRoadId) continue;
-      const c = s.central_curve;
-      if (mode === "fwd") {
-        const d0 = dist2D(tip, c[0]!); const dN = dist2D(tip, c[c.length - 1]!);
-        if (d0 < bd && lateralOk(tip, prev, c[0]!)) { bd = d0; best = s; br = false; }
-        if (dN < bd && lateralOk(tip, prev, c[c.length - 1]!)) { bd = dN; best = s; br = true; }
-      } else {
-        const dL = dist2D(tip, c[c.length - 1]!); const dF = dist2D(tip, c[0]!);
-        if (dL < bd && lateralOk(tip, prev, c[c.length - 1]!)) { bd = dL; best = s; br = false; }
-        if (dF < bd && lateralOk(tip, prev, c[0]!)) { bd = dF; best = s; br = true; }
-      }
-    }
-    return best ? { seg: best, rev: br } : undefined;
-  }
-
-  function lateralOk(tip: Vec3, prev: Vec3, candidate: Vec3): boolean {
-    if (egoRoadId.length > 0 || hasConnectivity) return true;
-    const dx = tip.x - prev.x; const dy = tip.y - prev.y;
-    const dirLen = Math.sqrt(dx * dx + dy * dy);
-    if (dirLen < 0.01) return true;
-    const cx = candidate.x - tip.x; const cy = candidate.y - tip.y;
-    return Math.abs(dx * cy - dy * cx) / dirLen < LATERAL_THRESH;
   }
 
   // ego segment を +x 方向に固定
