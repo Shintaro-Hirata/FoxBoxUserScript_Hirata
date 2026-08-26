@@ -744,6 +744,54 @@ lane_segment_traversal_time.targets[0].lateral_g_max_speed_kph
 
 ---
 
+### 9. `ego_lane_speed_limit.ts`
+
+**入力トピック**: `/t2/object_augmentor/augmented_scene`
+**出力トピック**: `/studio_script/ego_lane_speed_limit`
+
+自車が属する `local_map_info.local_lane_segments` の **`speed_limit_max`（制限速度上限）を毎フレーム出力**し、
+あわせて**左右隣接レーン**（`left_neighbor_forward_id` / `right_neighbor_forward_id` で解決）の
+`local_lane_segments` 詳細を出力します。
+
+> **speed_limit_max の意味**（`perception_msgs/msg/LocalLaneSegment.idl` より）:
+> 「マップ上で定義された制限速度の上限、もしくは標識などにより更新された制限速度の上限（m/s）」。
+> つまり**そのセグメントの制限速度**です（単位は m/s。本スクリプトが km/h 併記に変換）。
+> 地図由来の `speed_limit_max_map_debug`・VLM 認識由来の `speed_limit_max_vlm_debug` も参考出力します。
+
+**Variables パネルで設定する変数:** なし
+
+**トップレベル出力（Plot でそのまま使える値）:**
+
+| フィールド | 説明 |
+|---|---|
+| `speed_limit_max_kph` / `speed_limit_max_mps` | 自車レーンの制限速度上限 |
+| `speed_limit_max_map_kph` / `speed_limit_max_vlm_kph` | 地図由来 / VLM 由来の制限速度（debug） |
+| `left_speed_limit_max_kph` / `right_speed_limit_max_kph` | 左右隣レーンの制限速度（レーン無しは 0） |
+| `source` | 自車セグメント特定方法（`ego_indices` / `projection_fallback` / `none`） |
+| `ego_segment_count` / `ego_segment_ids` | 自車が属するセグメント数 / id 一覧 |
+
+**詳細出力（`ego` / `left` / `right` = 同一形状の `LaneInfo`、`ego_segments[]` = 自車の全セグメント）:**
+
+| フィールド | 説明 |
+|---|---|
+| `exists` / `id` / `segment_index` / `road_id` | 解決可否 / セグメント ID / インデックス / 道路 ID |
+| `length_m` / `nth_lane` | セグメント長 / 第何レーンか |
+| `speed_limit_max_kph` ほか速度系 | 制限速度・目標速度（km/h 換算） |
+| `lane_classification_name` | 車線属性（`PASSING_LANE` / `DRIVING_LANE` 等） |
+| `left_lc_permission_name` / `right_lc_permission_name` | 車線変更可否（`ALLOWED` 等） |
+| `is_target_lane` / `is_tollgate` / `is_tunnel` ほかフラグ | 各種属性フラグ |
+| `successor_ids` / `predecessor_ids` / `left_neighbor_ids` / `right_neighbor_ids` | 接続・隣接 id |
+| `context_name` / `location_name` | 位置コンテキスト（`PASSING_ETC` 等） |
+
+> 隣接 id は参照されているがローカルマップ範囲外の場合、`exists=false` のまま `id` のみ埋まります。
+> 左右レーンが存在しない場合は `exists=false` かつ `id=""` です。
+
+**Plot 例**: `speed_limit_max_kph` と `left_speed_limit_max_kph` / `right_speed_limit_max_kph` を重ねると、
+自車レーンと追い越し車線の制限速度差が時系列で確認できます。ETC 区間判別は `ego.context_name`
+（State Transitions パネル）を併用してください。
+
+---
+
 ## 制約と注意事項
 
 ### SL 座標系

@@ -69,6 +69,22 @@
   `raise_ok = 横G上限速度 ≥ 制限速度` で「制限速度まで横G内で到達可能か」を一目で示す。
 - 先読みで ETC 前後区間（`context_name`）の制限を事前に把握できる。
 
+## ego_lane_speed_limit.ts（自車レーン制限速度＋左右レーン）
+
+- 目的: 自車が属する `local_lane_segments` の `speed_limit_max` を毎フレーム Plot に出し続け、
+  左右隣接レーンの属性（制限速度・車線属性・LC 可否など）を同時に確認できるようにする。
+- `speed_limit_max` の裏取り: `perception_msgs/msg/LocalLaneSegment.idl` にて
+  「マップ上で定義された制限速度の上限、もしくは標識などにより更新された制限速度の上限（m/s）」
+  と定義済み。地図由来 `speed_limit_max_map_debug` / VLM 由来 `speed_limit_max_vlm_debug` も併記し、
+  実効値がどちら由来かを切り分けられるようにした。
+- 自車特定は `ego_lane_segments.ts` と同一（`ego_lane_segment_indices` → 原点最近傍フォールバック）。
+  代表（primary）は先頭インデックス。トップレベルのスカラー値は代表セグメントの値。
+- 左右レーンは代表セグメントの `left_neighbor_forward_id` / `right_neighbor_forward_id`
+  （IDL 上、各最大 1 要素）を id 検索で解決。代表に無ければ他の自車セグメントで補完。
+  参照 id がローカルマップ範囲外なら `exists=false` で `id` のみ埋める（スキーマ固定のため）。
+- `ego` / `left` / `right` / `ego_segments[]` は全て同一形状 `LaneInfo`（Foxglove のスキーマ推論対策）。
+- ステートレス（フレーム毎に完結）なので Seek リセット処理は不要。
+
 ## 曲率半径・横G上限速度の考え方（背景の核心）
 
 - 横加速度 `a = v²/R`。上限 `a_max=2.5 m/s²` のとき許容速度 `v = sqrt(a_max·R)`。

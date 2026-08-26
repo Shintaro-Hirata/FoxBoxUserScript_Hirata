@@ -50,6 +50,7 @@ T2 Yatagarasu の走行ログ（mcap）を Foxglove で再生し、レーン・�
 | `follower_gap_tracker.ts` | `augmented_scene`(+`odometry/ego`) | `/studio_script/follower_gap_tracker` | 後続車ギャップ／詰まりの定量化 |
 | `lateral_g_monitor.ts` | `/t2/odometry/ego` | `/studio_script/lateral_g_monitor` | 実測横G と上限比較 |
 | `speed_margin_profile.ts` | `augmented_scene`(+`odometry/ego`) | `/studio_script/speed_margin_profile` | 現在速度／制限速度／横G上限速度の比較 |
+| `ego_lane_speed_limit.ts` | `augmented_scene` | `/studio_script/ego_lane_speed_limit` | 自車レーンの speed_limit_max ＋左右隣接レーン詳細 |
 
 ## 絶対に守る FoxBox UserScript 制約（詳細は `docs/foxbox_userscript_conventions.md`）
 

@@ -281,5 +281,66 @@ console.log("--- TEST 12: follower uses ego_lane_segment_indices (bigint) as SL 
   approx(o.follower_gap_s_m, 15, 0.5, "follower gap 15");
 }
 
+console.log("--- TEST 13: ego_lane_speed_limit ego + neighbors ---");
+{
+  const esl = require("./out/ego_lane_speed_limit.js").default;
+  // 3 車線: L (左, 追い越し) / E (自車) / R (右)。E の隣接 id で L/R を解決する。
+  const L = {
+    id: "L", road_id: "rd1", central_curve: straight(-10, 40, 6), length: 50,
+    nth_lane: 2, speed_limit_max: 22.22, speed_limit_max_map_debug: 22.22,
+    speed_limit_max_vlm_debug: 0, lane_classification: 1, // PASSING_LANE
+    left_neighbor_forward_id: [], right_neighbor_forward_id: ["E"],
+  };
+  const E = {
+    id: "E", road_id: "rd1", central_curve: straight(-10, 40, 6), length: 50,
+    nth_lane: 1, speed_limit_max: 8.33, speed_limit_max_map_debug: 11.11,
+    speed_limit_max_vlm_debug: 8.33, speed_limit_min: 2.78,
+    lane_classification: 2, // DRIVING_LANE
+    is_target_lane: true, is_tollgate: true,
+    left_neighbor_forward_id: ["L"], right_neighbor_forward_id: ["R"],
+    left_lc_permission: 1, right_lc_permission: 2,
+    location_context: { location: 1, context: 3 }, // GENERIC / PASSING_ETC
+  };
+  const R = {
+    id: "R", road_id: "rd1", central_curve: straight(-10, 40, 6), length: 50,
+    nth_lane: 0, speed_limit_max: 8.33,
+    left_neighbor_forward_id: ["E"], right_neighbor_forward_id: [],
+  };
+  const ev = scene([L, E, R], [1]); ev.receiveTime = T(10);
+  const o = esl(ev, {});
+  ok(o.source === "ego_indices", "esl: source=ego_indices");
+  ok(o.ego.id === "E" && o.ego.exists === true, "esl: ego=E");
+  approx(o.speed_limit_max_mps, 8.33, 1e-6, "esl: top-level mps");
+  approx(o.speed_limit_max_kph, 29.988, 0.01, "esl: top-level kph");
+  approx(o.speed_limit_max_map_kph, 39.996, 0.01, "esl: map debug kph");
+  approx(o.speed_limit_max_vlm_kph, 29.988, 0.01, "esl: vlm debug kph");
+  ok(o.ego.is_tollgate === true && o.ego.context_name === "PASSING_ETC", "esl: ego ETC context");
+  ok(o.left.exists === true && o.left.id === "L", "esl: left=L resolved");
+  ok(o.left.lane_classification_name === "PASSING_LANE", "esl: left classification name");
+  approx(o.left_speed_limit_max_kph, 79.992, 0.01, "esl: left kph 80");
+  ok(o.right.exists === true && o.right.id === "R", "esl: right=R resolved");
+  ok(o.ego.left_lc_permission_name === "ALLOWED", "esl: left lc permission name");
+  ok(o.ego.right_lc_permission_name === "NOT_ALLOWED_REGULATION", "esl: right lc permission name");
+
+  // 隣接 id がローカルマップに無い場合: exists=false でも id は埋まる
+  const E2 = Object.assign({}, E, { left_neighbor_forward_id: ["GONE"], right_neighbor_forward_id: [] });
+  const ev2 = scene([E2], [0]); ev2.receiveTime = T(11);
+  const o2 = esl(ev2, {});
+  ok(o2.left.exists === false && o2.left.id === "GONE", "esl: missing left keeps id");
+  ok(o2.right.exists === false && o2.right.id === "", "esl: no right neighbor");
+  approx(o2.left_speed_limit_max_kph, 0, 1e-9, "esl: missing left kph=0");
+
+  // インデックス無し → 原点最近傍フォールバック
+  const ev3 = scene([L, E, R], []); ev3.receiveTime = T(12);
+  const o3 = esl(ev3, {});
+  ok(o3.source === "projection_fallback", "esl: fallback source");
+  ok(o3.ego_segment_count === 1, "esl: fallback picks one segment");
+
+  // bigint インデックス (uint64) も受理
+  const ev4 = scene([L, E, R], [BigInt(1)]); ev4.receiveTime = T(13);
+  const o4 = esl(ev4, {});
+  ok(o4.ego.id === "E", "esl: bigint index accepted");
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
